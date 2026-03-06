@@ -1,0 +1,714 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MeshLink — P2P Messenger</title>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.4/socket.io.min.js"></script>
+    <style>
+        :root {
+            --bg0:#0a0b0f;--bg1:#12141c;--bg2:#1a1d2a;--bg3:#222638;--bg4:#2a2f45;
+            --border:#262a3d;--border2:#363b55;
+            --t1:#e8eaf0;--t2:#8b90a5;--t3:#585d75;
+            --accent:#6c63ff;--accent2:#8b84ff;--accentg:#6c63ff40;
+            --green:#3dd68c;--greend:#3dd68c30;--red:#ff6b6b;--redd:#ff6b6b30;
+            --orange:#ffa94d;--cyan:#22d3ee;
+            --r:12px;--rs:8px;--tr:0.2s cubic-bezier(.4,0,.2,1);
+        }
+        *{margin:0;padding:0;box-sizing:border-box}
+        body{font-family:'Outfit',sans-serif;background:var(--bg0);color:var(--t1);height:100vh;overflow:hidden}
+
+        .app{display:grid;grid-template-columns:320px 1fr;height:100vh}
+
+        /* Sidebar */
+        .sidebar{background:var(--bg1);border-right:1px solid var(--border);display:flex;flex-direction:column;overflow:hidden}
+        .sidebar-header{padding:20px 20px 16px;border-bottom:1px solid var(--border)}
+        .logo{display:flex;align-items:center;gap:10px;margin-bottom:14px}
+        .logo-icon{width:36px;height:36px;background:linear-gradient(135deg,var(--accent),var(--cyan));border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:18px;font-weight:700;color:#fff;box-shadow:0 4px 20px var(--accentg)}
+        .logo h1{font-size:20px;font-weight:700;background:linear-gradient(135deg,var(--t1),var(--accent2));-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+        .node-info{display:flex;align-items:center;gap:8px;padding:8px 12px;background:var(--bg2);border-radius:var(--rs);font-size:12px;color:var(--t2);font-family:'JetBrains Mono',monospace}
+        .node-info .dot{width:8px;height:8px;background:var(--green);border-radius:50%;box-shadow:0 0 8px var(--green);animation:pulse 2s infinite}
+        @keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
+
+        .peers-section{flex:1;overflow-y:auto;padding:12px}
+        .section-label{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:1.5px;color:var(--t3);padding:8px 8px 12px}
+        .peer-item{display:flex;align-items:center;gap:12px;padding:12px;border-radius:var(--r);cursor:pointer;transition:all var(--tr)}
+        .peer-item:hover{background:var(--bg3)}.peer-item.active{background:var(--bg4)}
+        .peer-avatar{width:42px;height:42px;border-radius:12px;display:flex;align-items:center;justify-content:center;font-weight:600;font-size:16px;color:#fff;flex-shrink:0;position:relative}
+        .peer-avatar .status-dot{position:absolute;bottom:-2px;right:-2px;width:12px;height:12px;background:var(--green);border:2.5px solid var(--bg1);border-radius:50%}
+        .peer-info{flex:1;min-width:0}
+        .peer-name{font-weight:500;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+        .peer-ip{font-size:11px;color:var(--t3);font-family:'JetBrains Mono',monospace}
+        .peer-unread{background:var(--accent);color:#fff;font-size:11px;font-weight:600;padding:2px 7px;border-radius:10px}
+        .no-peers{text-align:center;padding:40px 20px;color:var(--t3)}
+        .no-peers svg{opacity:.3;margin-bottom:16px}.no-peers p{font-size:13px;line-height:1.6}
+
+        /* Chat */
+        .chat-area{display:flex;flex-direction:column;background:var(--bg0)}
+        .chat-header{display:flex;align-items:center;justify-content:space-between;padding:16px 24px;border-bottom:1px solid var(--border);background:var(--bg1)}
+        .chat-header-info{display:flex;align-items:center;gap:12px}
+        .chat-header-name{font-weight:600;font-size:16px}
+        .chat-header-status{font-size:12px;color:var(--green)}
+        .chat-actions{display:flex;gap:4px}
+
+        .btn-icon{width:40px;height:40px;display:flex;align-items:center;justify-content:center;border:none;background:0 0;color:var(--t2);border-radius:var(--rs);cursor:pointer;transition:all var(--tr)}
+        .btn-icon:hover{background:var(--bg3);color:var(--t1)}
+
+        .messages-container{flex:1;overflow-y:auto;padding:20px 24px;display:flex;flex-direction:column;gap:6px}
+        .msg-bubble{max-width:65%;padding:10px 14px;border-radius:16px;font-size:14px;line-height:1.55;word-break:break-word;animation:msgIn .25s ease-out}
+        @keyframes msgIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+        .msg-them{align-self:flex-start;background:var(--bg2);border-bottom-left-radius:4px}
+        .msg-me{align-self:flex-end;background:var(--accent);color:#fff;border-bottom-right-radius:4px}
+        .msg-time{font-size:10px;color:var(--t3);margin-top:4px;padding:0 4px}
+        .msg-me .msg-time{color:rgba(255,255,255,.5);text-align:right}
+        .msg-sender{font-size:11px;font-weight:600;color:var(--accent2);margin-bottom:3px}
+        .msg-file{background:var(--bg2);border:1px solid var(--border);border-radius:var(--r);padding:10px 14px;font-size:13px;max-width:65%;align-self:flex-start}
+        .msg-file.msg-file-me{align-self:flex-end;border-color:var(--accent);background:var(--accent)10}
+        .msg-file a{color:var(--accent2);text-decoration:none}
+
+        .file-card{display:flex;align-items:center;gap:12px}
+        .file-icon{width:44px;height:44px;border-radius:10px;background:var(--bg3);display:flex;align-items:center;justify-content:center;flex-shrink:0;font-size:20px}
+        .file-card-info{flex:1;min-width:0}
+        .file-card-name{font-size:13px;font-weight:500;color:var(--t1);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+        .file-card-meta{font-size:11px;color:var(--t3);margin-top:2px}
+        .file-dl-btn{width:38px;height:38px;border-radius:10px;background:var(--accent);border:none;display:flex;align-items:center;justify-content:center;cursor:pointer;transition:all var(--tr);flex-shrink:0;color:#fff}
+        .file-dl-btn:hover{background:var(--accent2);transform:scale(1.08)}
+        .file-sent-icon{width:38px;height:38px;border-radius:10px;background:var(--green)20;display:flex;align-items:center;justify-content:center;flex-shrink:0;color:var(--green)}
+
+        .typing-indicator{font-size:12px;color:var(--t3);padding:4px 8px;display:none;align-items:center;gap:6px}
+        .typing-indicator.visible{display:flex}
+        .typing-dots span{display:inline-block;width:5px;height:5px;background:var(--t3);border-radius:50%;animation:td 1.4s infinite}
+        .typing-dots span:nth-child(2){animation-delay:.2s}.typing-dots span:nth-child(3){animation-delay:.4s}
+        @keyframes td{0%,60%,100%{transform:translateY(0)}30%{transform:translateY(-4px)}}
+
+        .input-area{padding:16px 24px;border-top:1px solid var(--border);background:var(--bg1)}
+        .input-row{display:flex;align-items:flex-end;gap:10px}
+        .input-wrapper{flex:1;background:var(--bg2);border:1px solid var(--border);border-radius:var(--r);display:flex;align-items:flex-end;transition:border-color var(--tr)}
+        .input-wrapper:focus-within{border-color:var(--accent)}
+        #msg-input{flex:1;background:0 0;border:none;outline:none;color:var(--t1);font-family:'Outfit',sans-serif;font-size:14px;padding:12px 16px;resize:none;max-height:120px;line-height:1.5}
+        #msg-input::placeholder{color:var(--t3)}
+        .btn-attach{padding:10px;background:0 0;border:none;color:var(--t3);cursor:pointer;transition:color var(--tr)}.btn-attach:hover{color:var(--t1)}
+        .btn-send{width:44px;height:44px;display:flex;align-items:center;justify-content:center;background:var(--accent);border:none;border-radius:var(--r);color:#fff;cursor:pointer;transition:all var(--tr);flex-shrink:0}
+        .btn-send:hover{background:var(--accent2);transform:scale(1.05)}.btn-send:disabled{opacity:.3;cursor:default;transform:none}
+
+        .welcome{flex:1;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:20px;color:var(--t3)}
+        .welcome-icon{width:80px;height:80px;background:var(--bg2);border-radius:24px;display:flex;align-items:center;justify-content:center;font-size:36px}
+        .welcome h2{font-size:22px;color:var(--t2);font-weight:500}
+        .welcome p{font-size:14px;max-width:360px;text-align:center;line-height:1.6}
+
+        /* Call overlay */
+        .call-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.92);backdrop-filter:blur(24px);z-index:1000;flex-direction:column;align-items:center;justify-content:center;gap:24px}
+        .call-overlay.visible{display:flex}
+        .call-videos{position:relative;width:100%;max-width:800px;aspect-ratio:16/9;background:#000;border-radius:16px;overflow:hidden}
+        .call-videos video{width:100%;height:100%;object-fit:cover}
+        #remote-video{width:100%;height:100%;background:#111}
+        #local-video{position:absolute;bottom:16px;right:16px;width:180px;height:135px;border-radius:12px;border:2px solid rgba(255,255,255,.2);object-fit:cover;z-index:2;background:#222}
+        .call-audio-only{display:none;flex-direction:column;align-items:center;gap:20px}
+        .call-avatar-big{width:100px;height:100px;border-radius:30px;display:flex;align-items:center;justify-content:center;font-size:42px;font-weight:700;color:#fff;animation:cp 2s infinite}
+        @keyframes cp{0%,100%{box-shadow:0 0 0 0 var(--accentg)}50%{box-shadow:0 0 0 30px transparent}}
+        .call-name{font-size:24px;font-weight:600}
+        .call-status{font-size:14px;color:var(--t2)}
+        .call-timer{font-family:'JetBrains Mono',monospace;font-size:18px;color:var(--t2)}
+        .call-controls{display:flex;gap:12px;margin-top:16px}
+        .btn-call{width:56px;height:56px;border-radius:50%;display:flex;align-items:center;justify-content:center;border:none;cursor:pointer;transition:all var(--tr);color:#fff}
+        .btn-call:hover{transform:scale(1.1)}
+        .btn-call-end{background:var(--red)}.btn-call-accept{background:var(--green)}
+        .btn-call-mute{background:var(--bg3)}.btn-call-mute.active{background:var(--red)}
+        .btn-call-vid{background:var(--bg3)}.btn-call-vid.active{background:var(--red)}
+
+        /* Ringing overlay within call */
+        .ringing-ui{display:flex;flex-direction:column;align-items:center;gap:20px}
+
+        /* Toasts */
+        .toasts{position:fixed;bottom:24px;right:24px;display:flex;flex-direction:column;gap:8px;z-index:900;max-width:340px}
+        .toast{background:var(--bg1);border:1px solid var(--border);border-radius:var(--r);padding:14px 18px;box-shadow:0 8px 32px rgba(0,0,0,.4);animation:slideIn .3s ease-out}
+        @keyframes slideIn{from{opacity:0;transform:translateX(40px)}to{opacity:1;transform:translateX(0)}}
+        .toast-header{font-size:13px;font-weight:600;margin-bottom:8px}
+        .toast-progress{height:4px;background:var(--bg3);border-radius:2px;overflow:hidden}
+        .toast-bar{height:100%;background:var(--accent);border-radius:2px;transition:width .3s}
+        .toast-info{font-size:11px;color:var(--t3);margin-top:6px}
+
+        ::-webkit-scrollbar{width:6px}::-webkit-scrollbar-track{background:0 0}::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}
+        @media(max-width:768px){.app{grid-template-columns:1fr}.sidebar{display:none}}
+    </style>
+</head>
+<body>
+<div class="app">
+    <!-- Sidebar -->
+    <div class="sidebar">
+        <div class="sidebar-header">
+            <div class="logo"><div class="logo-icon">M</div><h1>MeshLink</h1></div>
+            <div class="node-info"><span class="dot"></span><span id="node-label">Connecting...</span></div>
+        </div>
+        <div class="peers-section">
+            <div class="section-label">Peers on network</div>
+            <div id="peers-list">
+                <div class="no-peers">
+                    <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="10"/><path d="M8 14s1.5 2 4 2 4-2 4-2"/><line x1="9" y1="9" x2="9.01" y2="9"/><line x1="15" y1="9" x2="15.01" y2="9"/></svg>
+                    <p>Scanning for peers on your network...</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Chat -->
+    <div class="chat-area">
+        <div class="welcome" id="welcome-screen">
+            <div class="welcome-icon">🔗</div>
+            <h2>Welcome to MeshLink</h2>
+            <p>Select a peer to start a secure P2P conversation. No servers, no internet.</p>
+        </div>
+        <div id="chat-view" style="display:none;flex-direction:column;flex:1;overflow:hidden">
+            <div class="chat-header">
+                <div class="chat-header-info">
+                    <div class="peer-avatar" id="chat-avatar" style="width:36px;height:36px;border-radius:10px;font-size:14px">?</div>
+                    <div>
+                        <div class="chat-header-name" id="chat-peer-name">—</div>
+                        <div class="chat-header-status" id="chat-peer-status">online</div>
+                    </div>
+                </div>
+                <div class="chat-actions">
+                    <button class="btn-icon" onclick="initiateCall('audio')" title="Voice call">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6A19.79 19.79 0 0 1 2.12 4.11 2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.127.96.361 1.903.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0 1 22 16.92z"/></svg>
+                    </button>
+                    <button class="btn-icon" onclick="initiateCall('video')" title="Video call">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>
+                    </button>
+                </div>
+            </div>
+            <div class="messages-container" id="messages"></div>
+            <div class="typing-indicator" id="typing-ind">
+                <div class="typing-dots"><span></span><span></span><span></span></div>
+                <span id="typing-name">Someone</span> is typing...
+            </div>
+            <div class="input-area">
+                <div class="input-row">
+                    <div class="input-wrapper">
+                        <button class="btn-attach" onclick="document.getElementById('file-input').click()" title="Send file">
+                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+                        </button>
+                        <textarea id="msg-input" placeholder="Type a message..." rows="1" onkeydown="handleKey(event)" oninput="handleTyping()"></textarea>
+                    </div>
+                    <button class="btn-send" id="btn-send" onclick="sendMessage()" disabled>
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Call overlay -->
+<div class="call-overlay" id="call-overlay">
+    <!-- Ringing state -->
+    <div class="ringing-ui" id="ringing-ui">
+        <div class="call-avatar-big" id="call-avatar-ring" style="background:var(--accent)">?</div>
+        <div class="call-name" id="call-name-ring">Unknown</div>
+        <div class="call-status" id="call-status-ring">Calling...</div>
+        <div class="call-controls">
+            <button class="btn-call btn-call-end" onclick="hangUp()" title="Decline">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.68 13.31a16 16 0 0 0 3.41 2.6l1.27-1.27a2 2 0 0 1 2.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0 1 22 16.92v3a2 2 0 0 1-2.18 2A19.79 19.79 0 0 1 11.19 18.86a19.5 19.5 0 0 1-6-6A19.79 19.79 0 0 1 2.12 4.11 2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.127.96.361 1.903.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+            </button>
+            <button class="btn-call btn-call-accept" id="btn-accept" onclick="acceptIncoming()" title="Accept" style="display:none">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 16.92v3a2 2 0 0 1-2.18 2A19.79 19.79 0 0 1 11.19 18.86a19.5 19.5 0 0 1-6-6A19.79 19.79 0 0 1 2.12 4.11 2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.127.96.361 1.903.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0 1 22 16.92z"/></svg>
+            </button>
+        </div>
+    </div>
+
+    <!-- Active call state -->
+    <div id="active-call-ui" style="display:none;width:100%;display:flex;flex-direction:column;align-items:center;gap:20px">
+        <!-- Video area -->
+        <div class="call-videos" id="call-videos" style="display:none">
+            <video id="remote-video" autoplay playsinline></video>
+            <video id="local-video" autoplay playsinline muted></video>
+        </div>
+        <!-- Audio-only area -->
+        <div class="call-audio-only" id="call-audio-only">
+            <div class="call-avatar-big" id="call-avatar-active" style="background:var(--accent)">?</div>
+            <div class="call-name" id="call-name-active">Unknown</div>
+        </div>
+        <div class="call-timer" id="call-timer">00:00</div>
+        <div class="call-controls">
+            <button class="btn-call btn-call-mute" id="btn-mute" onclick="toggleMute()" title="Mute">
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
+            </button>
+            <button class="btn-call btn-call-end" onclick="hangUp()" title="End call">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.68 13.31a16 16 0 0 0 3.41 2.6l1.27-1.27a2 2 0 0 1 2.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0 1 22 16.92v3a2 2 0 0 1-2.18 2A19.79 19.79 0 0 1 11.19 18.86a19.5 19.5 0 0 1-6-6A19.79 19.79 0 0 1 2.12 4.11 2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.127.96.361 1.903.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+            </button>
+            <button class="btn-call btn-call-vid" id="btn-vidtoggle" onclick="toggleVideo()" title="Toggle video">
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>
+            </button>
+        </div>
+    </div>
+    <audio id="remote-audio" autoplay></audio>
+</div>
+
+<div class="toasts" id="toasts"></div>
+<input type="file" id="file-input" style="display:none" onchange="handleFileSelect(event)">
+
+<script>
+// ════════════════════════════════════════════════════
+//  STATE
+// ════════════════════════════════════════════════════
+const S = {
+    nodeId:'', nodeName:'', peers:[], activePeer:null,
+    messages:{}, unread:{},
+    callPeer:null, callType:null, callDir:null,
+    callTimer:null, callSec:0, callActive:false,
+    muted:false, videoOff:false,
+};
+let pc = null;           // RTCPeerConnection
+let localStream = null;  // getUserMedia stream
+
+const COLORS = ['#6c63ff','#3dd68c','#ffa94d','#22d3ee','#ff6b6b','#a78bfa','#f472b6','#34d399'];
+function pColor(id){let h=0;for(let i=0;i<id.length;i++)h=id.charCodeAt(i)+((h<<5)-h);return COLORS[Math.abs(h)%COLORS.length]}
+function pInit(n){return(n||'?')[0].toUpperCase()}
+function fmtTime(ts){return new Date(ts*1000).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})}
+function fmtBytes(b){if(b<1024)return b+' B';if(b<1048576)return(b/1024).toFixed(1)+' KB';if(b<1073741824)return(b/1048576).toFixed(1)+' MB';return(b/1073741824).toFixed(2)+' GB'}
+function escHtml(t){const d=document.createElement('div');d.textContent=t;return d.innerHTML}
+
+// ════════════════════════════════════════════════════
+//  SOCKET.IO
+// ════════════════════════════════════════════════════
+const socket = io();
+
+socket.on('node_info', i => {
+    S.nodeId=i.node_id; S.nodeName=i.node_name;
+    document.getElementById('node-label').textContent=`${i.node_name} · ${i.local_ip}`;
+});
+socket.on('peers_list', p => { S.peers=p; renderPeers(); });
+socket.on('peer_joined', p => {
+    const i=S.peers.findIndex(x=>x.peer_id===p.peer_id);
+    if(i>=0)S.peers[i]=p; else S.peers.push(p);
+    renderPeers(); toast(`${p.name} joined`);
+});
+socket.on('peer_left', p => {
+    S.peers=S.peers.filter(x=>x.peer_id!==p.peer_id);
+    renderPeers(); toast(`${p.name} offline`);
+});
+socket.on('message', m => {
+    const pid=m.sender_id;
+    if(!S.messages[pid])S.messages[pid]=[];
+    S.messages[pid].push(m);
+    if(S.activePeer===pid){appendMsg(m);scrollBot();}
+    else{S.unread[pid]=(S.unread[pid]||0)+1;renderPeers();}
+});
+socket.on('message_sent', () => {});
+socket.on('typing', d => { if(d.peer_id===S.activePeer) showTyping(d.peer_name); });
+socket.on('chat_history', d => { S.messages[d.peer_id]=d.messages; if(S.activePeer===d.peer_id)renderMsgs(d.peer_id); });
+
+// File transfer
+socket.on('file_progress', updateXfer);
+socket.on('file_complete', completeXfer);
+
+// Call signaling (TCP-relayed)
+socket.on('call_incoming', d => {
+    S.callPeer=d.peer_id; S.callType=d.call_type; S.callDir='incoming';
+    showRinging(d.peer_name, d.call_type, true);
+});
+socket.on('call_outgoing', d => {
+    showRinging(d.peer_name, d.call_type, false);
+});
+socket.on('call_accepted', d => {
+    // Remote accepted → we (caller) create WebRTC offer
+    if(S.callDir==='outgoing') startWebRTC(true);
+});
+socket.on('call_rejected', () => { hideCall(); toast('Call declined'); });
+socket.on('call_ended', () => { cleanupCall(); hideCall(); });
+
+// WebRTC signaling (relayed via TCP between peers)
+socket.on('webrtc_offer', async d => {
+    S.callPeer=d.peer_id;
+    await startWebRTC(false);
+    await pc.setRemoteDescription(new RTCSessionDescription(d.sdp));
+    const answer = await pc.createAnswer();
+    await pc.setLocalDescription(answer);
+    socket.emit('webrtc_answer',{peer_id:d.peer_id, sdp:answer});
+});
+socket.on('webrtc_answer', async d => {
+    if(pc) await pc.setRemoteDescription(new RTCSessionDescription(d.sdp));
+});
+socket.on('webrtc_ice', async d => {
+    if(pc && d.candidate){
+        try{await pc.addIceCandidate(new RTCIceCandidate(d.candidate));}catch(e){console.log('ICE error',e);}
+    }
+});
+
+setInterval(()=>socket.emit('get_peers'),5000);
+
+// ════════════════════════════════════════════════════
+//  RENDERING
+// ════════════════════════════════════════════════════
+function renderPeers(){
+    const el=document.getElementById('peers-list');
+    if(!S.peers.length){el.innerHTML='<div class="no-peers"><p>Scanning for peers...</p></div>';return;}
+    el.innerHTML=S.peers.map(p=>{
+        const a=S.activePeer===p.peer_id?' active':'';
+        const u=S.unread[p.peer_id]||0;
+        return `<div class="peer-item${a}" onclick="selectPeer('${p.peer_id}')">
+            <div class="peer-avatar" style="background:${pColor(p.peer_id)}">${pInit(p.name)}<div class="status-dot"></div></div>
+            <div class="peer-info"><div class="peer-name">${escHtml(p.name)}</div><div class="peer-ip">${p.ip}</div></div>
+            ${u?`<div class="peer-unread">${u}</div>`:''}
+        </div>`;
+    }).join('');
+}
+
+function selectPeer(pid){
+    S.activePeer=pid; S.unread[pid]=0; renderPeers();
+    const p=S.peers.find(x=>x.peer_id===pid); if(!p)return;
+    document.getElementById('welcome-screen').style.display='none';
+    document.getElementById('chat-view').style.display='flex';
+    document.getElementById('chat-avatar').style.background=pColor(pid);
+    document.getElementById('chat-avatar').textContent=pInit(p.name);
+    document.getElementById('chat-peer-name').textContent=p.name;
+    document.getElementById('chat-peer-status').textContent=`online · ${p.ip}`;
+    socket.emit('get_chat',{peer_id:pid});
+    renderMsgs(pid);
+}
+
+function renderMsgs(pid){
+    const c=document.getElementById('messages');
+    c.innerHTML='';
+    (S.messages[pid]||[]).forEach(m=>appendMsg(m,false));
+    scrollBot();
+}
+
+function appendMsg(m,anim=true){
+    const c=document.getElementById('messages');
+    const me=m.is_me||m.sender_id===S.nodeId;
+    const div=document.createElement('div');
+
+    if(m.msg_type==='file'){
+        // File message card
+        div.className=`msg-file${me?' msg-file-me':''}`;
+        if(!anim)div.style.animation='none';
+
+        const fname = m.file_name || m.text || 'file';
+        const fsize = m.file_size ? fmtBytes(m.file_size) : '';
+        const ext = fname.split('.').pop().toUpperCase();
+
+        // Pick icon by extension
+        const extIcons = {
+            'PDF':'📄','DOC':'📝','DOCX':'📝','TXT':'📝',
+            'JPG':'🖼','JPEG':'🖼','PNG':'🖼','GIF':'🖼','WEBP':'🖼','SVG':'🖼',
+            'MP3':'🎵','WAV':'🎵','OGG':'🎵','FLAC':'🎵',
+            'MP4':'🎬','AVI':'🎬','MOV':'🎬','MKV':'🎬','WEBM':'🎬',
+            'ZIP':'📦','RAR':'📦','7Z':'📦','TAR':'📦','GZ':'📦',
+            'PY':'🐍','JS':'⚡','HTML':'🌐','CSS':'🎨','JSON':'{}',
+            'EXE':'⚙️','APK':'📱',
+        };
+        const icon = extIcons[ext] || '📎';
+
+        let actionHtml = '';
+        if(!me && m.file_url){
+            // Received file — show download button
+            actionHtml = `<a href="${escHtml(m.file_url)}" download="${escHtml(fname)}" class="file-dl-btn" title="Download">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                    <polyline points="7 10 12 15 17 10"/>
+                    <line x1="12" y1="15" x2="12" y2="3"/>
+                </svg>
+            </a>`;
+        } else if(me){
+            // Sent file — show check icon
+            actionHtml = `<div class="file-sent-icon" title="Sent">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                    <polyline points="20 6 9 17 4 12"/>
+                </svg>
+            </div>`;
+        }
+
+        div.innerHTML = `
+            <div class="file-card">
+                <div class="file-icon">${icon}</div>
+                <div class="file-card-info">
+                    <div class="file-card-name">${escHtml(fname)}</div>
+                    <div class="file-card-meta">${ext}${fsize ? ' · '+fsize : ''} · ${fmtTime(m.timestamp)}</div>
+                </div>
+                ${actionHtml}
+            </div>`;
+    } else {
+        // Text message
+        div.className=`msg-bubble ${me?'msg-me':'msg-them'}`;
+        if(!anim)div.style.animation='none';
+        let h='';
+        if(!me)h+=`<div class="msg-sender">${escHtml(m.sender_name)}</div>`;
+        h+=`<div>${escHtml(m.text)}</div>`;
+        h+=`<div class="msg-time">${fmtTime(m.timestamp)}</div>`;
+        div.innerHTML=h;
+    }
+    c.appendChild(div);
+}
+
+function scrollBot(){const c=document.getElementById('messages');requestAnimationFrame(()=>c.scrollTop=c.scrollHeight);}
+
+// ════════════════════════════════════════════════════
+//  INPUT
+// ════════════════════════════════════════════════════
+const msgInput=document.getElementById('msg-input');
+const btnSend=document.getElementById('btn-send');
+msgInput.addEventListener('input',()=>{
+    btnSend.disabled=!msgInput.value.trim();
+    msgInput.style.height='auto';
+    msgInput.style.height=Math.min(msgInput.scrollHeight,120)+'px';
+});
+function handleKey(e){if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();sendMessage();}}
+let typTO=null;
+function handleTyping(){
+    if(!S.activePeer)return;
+    if(!typTO)socket.emit('typing',{peer_id:S.activePeer});
+    clearTimeout(typTO);typTO=setTimeout(()=>typTO=null,2000);
+}
+function sendMessage(){
+    const t=msgInput.value.trim();if(!t||!S.activePeer)return;
+    const m={msg_id:Date.now().toString(),sender_id:S.nodeId,sender_name:S.nodeName,text:t,timestamp:Date.now()/1000,is_me:true,msg_type:'text'};
+    if(!S.messages[S.activePeer])S.messages[S.activePeer]=[];
+    S.messages[S.activePeer].push(m);appendMsg(m);scrollBot();
+    socket.emit('send_message',{peer_id:S.activePeer,text:t});
+    msgInput.value='';msgInput.style.height='auto';btnSend.disabled=true;
+}
+
+let typHide=null;
+function showTyping(name){
+    const el=document.getElementById('typing-ind');
+    document.getElementById('typing-name').textContent=name;
+    el.classList.add('visible');
+    clearTimeout(typHide);typHide=setTimeout(()=>el.classList.remove('visible'),3000);
+}
+
+// ════════════════════════════════════════════════════
+//  FILE TRANSFER
+// ════════════════════════════════════════════════════
+function handleFileSelect(e){
+    const file=e.target.files[0];if(!file||!S.activePeer)return;
+    const fd=new FormData();fd.append('file',file);fd.append('peer_id',S.activePeer);
+    toast(`Sending ${file.name}...`);
+    fetch('/api/upload',{method:'POST',body:fd})
+        .then(r=>r.json()).then(d=>{if(d.file_id)addXferToast(d.file_id,d.filename,'send');})
+        .catch(()=>toast('Upload failed'));
+    e.target.value='';
+}
+
+function addXferToast(fid,fname,dir){
+    const c=document.getElementById('toasts');
+    const d=document.createElement('div');d.className='toast';d.id='xfer-'+fid;
+    d.innerHTML=`<div class="toast-header">${dir==='send'?'↑ Sending':'↓ Receiving'}: ${escHtml(fname)}</div>
+        <div class="toast-progress"><div class="toast-bar" style="width:0%"></div></div>
+        <div class="toast-info">Starting...</div>`;
+    c.appendChild(d);
+}
+
+function updateXfer(d){
+    let el=document.getElementById('xfer-'+d.file_id);
+    if(!el)addXferToast(d.file_id,d.filename,d.direction);
+    el=document.getElementById('xfer-'+d.file_id);
+    if(!el)return;
+    if(d.status==='failed'||d.status==='rejected'){
+        el.querySelector('.toast-header').textContent=`✗ ${d.filename} — ${d.status}`;
+        el.querySelector('.toast-bar').style.background='var(--red)';
+        setTimeout(()=>el.remove(),4000);return;
+    }
+    el.querySelector('.toast-bar').style.width=d.percent+'%';
+    const speed=d.speed>0?fmtBytes(d.speed)+'/s':'';
+    el.querySelector('.toast-info').textContent=`${d.percent}% · ${fmtBytes(d.progress)}/${fmtBytes(d.filesize)} ${speed}`;
+}
+
+function completeXfer(d){
+    const el=document.getElementById('xfer-'+d.file_id);
+    if(el){
+        el.querySelector('.toast-header').textContent=`✓ ${d.filename}`;
+        el.querySelector('.toast-bar').style.width='100%';
+        el.querySelector('.toast-bar').style.background='var(--green)';
+        el.querySelector('.toast-info').textContent='Complete';
+        setTimeout(()=>el.remove(),5000);
+    }
+}
+
+// ════════════════════════════════════════════════════
+//  WEBRTC CALLS
+// ════════════════════════════════════════════════════
+
+const rtcConfig = {
+    iceServers: [
+        // LAN-only: no STUN needed, but include one for networks with NAT
+        { urls: 'stun:stun.l.google.com:19302' }
+    ]
+};
+
+function initiateCall(type){
+    if(!S.activePeer)return;
+    S.callPeer=S.activePeer; S.callType=type; S.callDir='outgoing';
+    // Send call invite via TCP messaging
+    socket.emit('start_call',{peer_id:S.activePeer,call_type:type});
+}
+
+function acceptIncoming(){
+    if(!S.callPeer)return;
+    socket.emit('accept_call',{peer_id:S.callPeer});
+    // The caller will send WebRTC offer after receiving our accept
+}
+
+async function startWebRTC(isCaller){
+    cleanupCall(false); // cleanup without hiding UI
+
+    const isVideo = S.callType === 'video';
+
+    // Get local media
+    try {
+        const constraints = { audio: true, video: isVideo };
+        localStream = await navigator.mediaDevices.getUserMedia(constraints);
+    } catch(e) {
+        console.error('getUserMedia failed:', e);
+        toast('Could not access microphone/camera');
+        hangUp(); return;
+    }
+
+    // Show active call UI
+    showActiveCall(isVideo);
+
+    if(isVideo){
+        document.getElementById('local-video').srcObject = localStream;
+    }
+
+    // Create peer connection
+    pc = new RTCPeerConnection(rtcConfig);
+
+    // Add local tracks
+    localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
+
+    // Handle remote tracks
+    pc.ontrack = (e) => {
+        console.log('Got remote track:', e.track.kind);
+        if(e.track.kind === 'video'){
+            document.getElementById('remote-video').srcObject = e.streams[0];
+        } else {
+            document.getElementById('remote-audio').srcObject = e.streams[0];
+        }
+    };
+
+    // ICE candidates → relay to peer
+    pc.onicecandidate = (e) => {
+        if(e.candidate && S.callPeer){
+            socket.emit('webrtc_ice', {
+                peer_id: S.callPeer,
+                candidate: e.candidate.toJSON()
+            });
+        }
+    };
+
+    pc.onconnectionstatechange = () => {
+        console.log('RTC state:', pc.connectionState);
+        if(pc.connectionState === 'connected'){
+            S.callActive = true;
+            startTimer();
+        }
+        if(pc.connectionState === 'disconnected' || pc.connectionState === 'failed'){
+            hangUp();
+        }
+    };
+
+    // If caller, create and send offer
+    if(isCaller){
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        socket.emit('webrtc_offer', {
+            peer_id: S.callPeer,
+            sdp: offer,
+            call_type: S.callType
+        });
+    }
+}
+
+function showRinging(name, type, incoming){
+    const ov = document.getElementById('call-overlay');
+    ov.classList.add('visible');
+    document.getElementById('ringing-ui').style.display='flex';
+    document.getElementById('active-call-ui').style.display='none';
+    document.getElementById('call-name-ring').textContent=name;
+    document.getElementById('call-status-ring').textContent=
+        incoming ? `Incoming ${type} call...` : 'Ringing...';
+    document.getElementById('call-avatar-ring').textContent=pInit(name);
+    document.getElementById('call-avatar-ring').style.background=pColor(S.callPeer||'');
+    document.getElementById('btn-accept').style.display=incoming?'':'none';
+}
+
+function showActiveCall(isVideo){
+    document.getElementById('ringing-ui').style.display='none';
+    const acu=document.getElementById('active-call-ui');
+    acu.style.display='flex';
+
+    if(isVideo){
+        document.getElementById('call-videos').style.display='block';
+        document.getElementById('call-audio-only').style.display='none';
+    } else {
+        document.getElementById('call-videos').style.display='none';
+        document.getElementById('call-audio-only').style.display='flex';
+        const p=S.peers.find(x=>x.peer_id===S.callPeer);
+        if(p){
+            document.getElementById('call-name-active').textContent=p.name;
+            document.getElementById('call-avatar-active').textContent=pInit(p.name);
+            document.getElementById('call-avatar-active').style.background=pColor(p.peer_id);
+        }
+    }
+}
+
+function hideCall(){
+    document.getElementById('call-overlay').classList.remove('visible');
+}
+
+function hangUp(){
+    socket.emit('end_call');
+    cleanupCall();
+    hideCall();
+}
+
+function cleanupCall(full=true){
+    if(pc){try{pc.close();}catch(e){}pc=null;}
+    if(localStream){localStream.getTracks().forEach(t=>t.stop());localStream=null;}
+    document.getElementById('remote-video').srcObject=null;
+    document.getElementById('local-video').srcObject=null;
+    document.getElementById('remote-audio').srcObject=null;
+    S.callActive=false; S.muted=false; S.videoOff=false;
+    if(S.callTimer){clearInterval(S.callTimer);S.callTimer=null;}
+    S.callSec=0;
+    document.getElementById('btn-mute').classList.remove('active');
+    document.getElementById('btn-vidtoggle').classList.remove('active');
+    if(full){S.callPeer=null; S.callDir=null;}
+}
+
+function startTimer(){
+    S.callSec=0;
+    const el=document.getElementById('call-timer');
+    S.callTimer=setInterval(()=>{
+        S.callSec++;
+        const m=String(Math.floor(S.callSec/60)).padStart(2,'0');
+        const s=String(S.callSec%60).padStart(2,'0');
+        el.textContent=m+':'+s;
+    },1000);
+}
+
+function toggleMute(){
+    S.muted=!S.muted;
+    if(localStream)localStream.getAudioTracks().forEach(t=>t.enabled=!S.muted);
+    document.getElementById('btn-mute').classList.toggle('active',S.muted);
+}
+
+function toggleVideo(){
+    S.videoOff=!S.videoOff;
+    if(localStream)localStream.getVideoTracks().forEach(t=>t.enabled=!S.videoOff);
+    document.getElementById('btn-vidtoggle').classList.toggle('active',S.videoOff);
+}
+
+// ════════════════════════════════════════════════════
+//  TOASTS
+// ════════════════════════════════════════════════════
+function toast(text){
+    const c=document.getElementById('toasts');
+    const d=document.createElement('div');d.className='toast';
+    d.innerHTML=`<div class="toast-header">${escHtml(text)}</div>`;
+    c.appendChild(d);setTimeout(()=>d.remove(),4000);
+}
+</script>
+</body>
+</html>
