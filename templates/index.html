@@ -32,6 +32,13 @@
         @keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
 
         .peers-section{flex:1;overflow-y:auto;padding:12px}
+        .security-panel{border-top:1px solid var(--border);padding:12px;background:var(--bg1)}
+        .security-title{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:1.5px;color:var(--t3);margin-bottom:8px}
+        .security-row{display:flex;justify-content:space-between;gap:8px;font-size:12px;color:var(--t2);margin-bottom:6px}
+        .security-row strong{color:var(--t1);font-weight:600}
+        .security-log{max-height:140px;overflow-y:auto;background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:8px}
+        .security-log-item{font-size:11px;color:var(--t2);line-height:1.45;margin-bottom:6px}
+        .security-log-item:last-child{margin-bottom:0}
         .section-label{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:1.5px;color:var(--t3);padding:8px 8px 12px}
         .peer-item{display:flex;align-items:center;gap:12px;padding:12px;border-radius:var(--r);cursor:pointer;transition:all var(--tr)}
         .peer-item:hover{background:var(--bg3)}.peer-item.active{background:var(--bg4)}
@@ -163,6 +170,13 @@
                 </div>
             </div>
         </div>
+        <div class="security-panel">
+            <div class="security-title">Security</div>
+            <div class="security-row"><span>Trusted-only</span><strong id="sec-trusted-only">off</strong></div>
+            <div class="security-row"><span>Blacklist</span><strong id="sec-blacklist">0</strong></div>
+            <div class="security-row"><span>Banned</span><strong id="sec-banned">0</strong></div>
+            <div class="security-log" id="sec-log"></div>
+        </div>
     </div>
 
     <!-- Chat -->
@@ -277,6 +291,7 @@ const S = {
     callTimer:null, callSec:0, callActive:false,
     muted:false, videoOff:false,
     mediaStats:{latency_ms:0,loss_percent:0,jitter_ms:0,bitrate_kbps:0},
+    security:{trustedOnly:false,blacklist:[],banned:{},events:[]},
 };
 let pc = null;           // RTCPeerConnection
 let localStream = null;  // getUserMedia stream
@@ -285,6 +300,7 @@ const COLORS = ['#6c63ff','#3dd68c','#ffa94d','#22d3ee','#ff6b6b','#a78bfa','#f4
 function pColor(id){let h=0;for(let i=0;i<id.length;i++)h=id.charCodeAt(i)+((h<<5)-h);return COLORS[Math.abs(h)%COLORS.length]}
 function pInit(n){return(n||'?')[0].toUpperCase()}
 function fmtTime(ts){return new Date(ts*1000).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})}
+function fmtTs(ts){return new Date(ts*1000).toLocaleString()}
 function fmtBytes(b){if(b<1024)return b+' B';if(b<1048576)return(b/1024).toFixed(1)+' KB';if(b<1073741824)return(b/1048576).toFixed(1)+' MB';return(b/1073741824).toFixed(2)+' GB'}
 function escHtml(t){const d=document.createElement('div');d.textContent=t;return d.innerHTML}
 
@@ -296,6 +312,8 @@ const socket = io();
 socket.on('node_info', i => {
     S.nodeId=i.node_id; S.nodeName=i.node_name;
     document.getElementById('node-label').textContent=`${i.node_name} · ${i.local_ip}`;
+    S.security.trustedOnly=Boolean(i.trusted_only_private_chats);
+    renderSecurityPanel();
 });
 socket.on('peers_list', p => { S.peers=p; renderPeers(); });
 socket.on('peer_joined', p => {
@@ -339,6 +357,23 @@ socket.on('media_stats', d => {
     S.mediaStats=d||S.mediaStats;
     renderCallMetrics();
 });
+socket.on('security_event', e => {
+    if(!e)return;
+    S.security.events.push(e);
+    if(S.security.events.length>200)S.security.events=S.security.events.slice(-200);
+    renderSecurityPanel();
+});
+
+fetch('/api/security/snapshot')
+    .then(r=>r.json())
+    .then(s=>{
+        S.security.trustedOnly=Boolean(s.trusted_only_private_chats);
+        S.security.blacklist=Array.isArray(s.blacklist)?s.blacklist:[];
+        S.security.banned=s.banned||{};
+        S.security.events=Array.isArray(s.events)?s.events:[];
+        renderSecurityPanel();
+    })
+    .catch(()=>{});
 
 // File transfer
 socket.on('file_progress', updateXfer);
@@ -503,6 +538,24 @@ function renderCallMetrics(){
     set('m-loss', `${loss}%`);
     set('m-jitter', `${jitter} ms`);
     set('m-bitrate', `${bitrate} kbps`);
+}
+
+function renderSecurityPanel(){
+    const sec=S.security||{};
+    const trustEl=document.getElementById('sec-trusted-only');
+    const blEl=document.getElementById('sec-blacklist');
+    const banEl=document.getElementById('sec-banned');
+    const logEl=document.getElementById('sec-log');
+    if(trustEl)trustEl.textContent=sec.trustedOnly?'on':'off';
+    if(blEl)blEl.textContent=String((sec.blacklist||[]).length);
+    if(banEl)banEl.textContent=String(Object.keys(sec.banned||{}).length);
+    if(logEl){
+        const rows=(sec.events||[]).slice(-20).reverse();
+        logEl.innerHTML=rows.length?rows.map(ev=>`<div class="security-log-item">`+
+            `<strong>${escHtml(ev.event||'event')}</strong><br>`+
+            `<span>${escHtml((ev.peer_id||'system')+' · '+fmtTs(ev.ts||Date.now()/1000))}</span>`+
+            `</div>`).join(''):'<div class="security-log-item">No security events yet</div>';
+    }
 }
 
 function scrollBot(){const c=document.getElementById('messages');requestAnimationFrame(()=>c.scrollTop=c.scrollHeight);}

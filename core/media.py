@@ -11,6 +11,7 @@ import struct
 import socket
 import logging
 import threading
+import collections
 from enum import IntEnum
 from typing import Callable, Optional
 
@@ -55,9 +56,13 @@ class MediaEngine:
         self._seq_in = 0
         self._last_recv_ts_ms = None
         self._last_recv_wall = None
-        self._bitrate_last_bytes = 0
-        self._bitrate_last_time = time.time()
-        self._last_seq = 0
+        self._last_seq = None
+        self._rx_expected_packets = 0
+        self._rx_lost_packets = 0
+        self._jitter_ewma_ms = 0.0
+        self._latency_ewma_ms = 0.0
+        self._bitrate_window = collections.deque()  # (recv_time, packet_size)
+        self._bitrate_window_seconds = 2.0
         self._stats_lock = threading.Lock()
 
         # Callbacks for received media
@@ -111,7 +116,12 @@ class MediaEngine:
             self.stats = {k: 0 for k in self.stats}
         self._last_recv_ts_ms = None
         self._last_recv_wall = None
-        self._last_seq = 0
+        self._last_seq = None
+        self._rx_expected_packets = 0
+        self._rx_lost_packets = 0
+        self._jitter_ewma_ms = 0.0
+        self._latency_ewma_ms = 0.0
+        self._bitrate_window.clear()
         logger.info(f"Call started → {peer_ip}:{peer_media_port}")
         if self.on_call_state_change:
             self.on_call_state_change(CallState.ACTIVE)
@@ -187,6 +197,13 @@ class MediaEngine:
 
     # ── Receiving ───────────────────────────────────────────
 
+    @staticmethod
+    def _seq_gap(prev_seq: int, cur_seq: int) -> int:
+        """Return positive packet gap between previous and current 32-bit seq values."""
+        if cur_seq >= prev_seq:
+            return cur_seq - prev_seq
+        return (0xFFFFFFFF - prev_seq) + cur_seq + 1
+
     def _recv_loop(self):
         """Main receive loop for media packets."""
         video_fragments: dict = {}
@@ -212,31 +229,51 @@ class MediaEngine:
             with self._stats_lock:
                 self.stats["packets_recv"] += 1
                 self.stats["bytes_recv"] += len(data)
-                self.stats["latency_ms"] = max(0, now_ms - ts)
+                latency_now = max(0.0, float(now_ms - ts))
+                if self._latency_ewma_ms <= 0.0:
+                    self._latency_ewma_ms = latency_now
+                else:
+                    # Быстрый EWMA для визуально стабильного WebRTC-подобного графика.
+                    self._latency_ewma_ms = (self._latency_ewma_ms * 0.8) + (latency_now * 0.2)
+                self.stats["latency_ms"] = round(self._latency_ewma_ms, 2)
 
-                # Packet loss estimate from seq gaps
-                if self._last_seq > 0 and seq > self._last_seq + 1:
-                    lost = seq - self._last_seq - 1
-                    recv = max(1, self.stats["packets_recv"])
-                    self.stats["loss_percent"] = round((lost / (lost + recv)) * 100.0, 2)
-                self._last_seq = max(self._last_seq, seq)
+                # Packet loss estimate using cumulative expected/received based on seq gaps.
+                if self._last_seq is None:
+                    self._rx_expected_packets += 1
+                else:
+                    gap = self._seq_gap(int(self._last_seq), int(seq))
+                    if gap <= 0:
+                        gap = 1
+                    self._rx_expected_packets += gap
+                    if gap > 1:
+                        self._rx_lost_packets += (gap - 1)
+                self._last_seq = seq
+                if self._rx_expected_packets > 0:
+                    loss = (self._rx_lost_packets / self._rx_expected_packets) * 100.0
+                    self.stats["loss_percent"] = round(loss, 2)
 
                 # RTP-style jitter approximation
                 if self._last_recv_ts_ms is not None and self._last_recv_wall is not None:
                     sent_delta = max(0.0, (ts - self._last_recv_ts_ms) / 1000.0)
                     recv_delta = max(0.0, now_wall - self._last_recv_wall)
                     d_ms = abs((recv_delta - sent_delta) * 1000.0)
-                    prev_j = float(self.stats.get("jitter_ms", 0.0) or 0.0)
-                    self.stats["jitter_ms"] = round(prev_j + (d_ms - prev_j) / 16.0, 2)
+                    self._jitter_ewma_ms = self._jitter_ewma_ms + ((d_ms - self._jitter_ewma_ms) / 16.0)
+                    self.stats["jitter_ms"] = round(self._jitter_ewma_ms, 2)
                 self._last_recv_ts_ms = ts
                 self._last_recv_wall = now_wall
 
-                # Bitrate estimate over last interval
-                dt = max(0.001, now_wall - self._bitrate_last_time)
-                dbytes = max(0, self.stats["bytes_recv"] - self._bitrate_last_bytes)
-                self.stats["bitrate_kbps"] = round((dbytes * 8.0 / 1000.0) / dt, 2)
-                self._bitrate_last_bytes = self.stats["bytes_recv"]
-                self._bitrate_last_time = now_wall
+                # Sliding-window bitrate estimate (2s) closer to real RTC view.
+                self._bitrate_window.append((now_wall, len(data)))
+                cutoff = now_wall - self._bitrate_window_seconds
+                while self._bitrate_window and self._bitrate_window[0][0] < cutoff:
+                    self._bitrate_window.popleft()
+                if len(self._bitrate_window) >= 2:
+                    t0 = self._bitrate_window[0][0]
+                    span = max(0.2, now_wall - t0)
+                    bytes_in_window = sum(sz for _, sz in self._bitrate_window)
+                    self.stats["bitrate_kbps"] = round((bytes_in_window * 8.0 / 1000.0) / span, 2)
+                elif self._bitrate_window:
+                    self.stats["bitrate_kbps"] = round((self._bitrate_window[0][1] * 8.0) / 1000.0, 2)
 
             # Auto-accept incoming media as a call
             if self._call_state != CallState.ACTIVE and ptype in (MEDIA_AUDIO, MEDIA_VIDEO):

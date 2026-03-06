@@ -205,9 +205,22 @@ class MeshNode:
         # Security subsystems
         self._seen_msgs  = _LRUSet(MESH_LRU_MAX_SIZE)
         self._rate_limiter = _RateLimiter()
+        self._security_events = collections.deque(maxlen=1000)
+        self._security_lock = threading.Lock()
 
         self._event_handlers: Dict[str, List[Callable]] = {}
         self._setup_handlers()
+
+    def _record_security_event(self, event_type: str, peer_id: str = "", details: Optional[dict] = None):
+        event = {
+            "ts": time.time(),
+            "event": event_type,
+            "peer_id": peer_id,
+            "details": details or {},
+        }
+        with self._security_lock:
+            self._security_events.append(event)
+        self._emit("security_event", event)
 
     # ── Handler wiring ───────────────────────────────────────────────────────
 
@@ -306,12 +319,20 @@ class MeshNode:
         # Rate limit / blacklist
         if not self._rate_limiter.is_allowed(msg.sender_id):
             logger.debug(f"Dropped message from rate-limited/blacklisted peer {msg.sender_id}")
+            self._record_security_event("dropped_rate_limited_or_blacklisted", msg.sender_id, {
+                "msg_id": msg.msg_id,
+                "msg_type": int(msg.msg_type),
+            })
             return False
 
         # LRU deduplication (also prevents relay loops)
         msg_id = msg.msg_id
         if msg_id and self._seen_msgs.contains(msg_id):
             logger.debug(f"Duplicate message dropped: {msg_id}")
+            self._record_security_event("dropped_duplicate", msg.sender_id, {
+                "msg_id": msg_id,
+                "msg_type": int(msg.msg_type),
+            })
             return False
         if msg_id:
             self._seen_msgs.add(msg_id)
@@ -319,6 +340,10 @@ class MeshNode:
         if TRUSTED_ONLY_PRIVATE_CHATS and msg.msg_type == MsgType.TEXT:
             if not self.crypto.is_trusted(msg.sender_id):
                 logger.info(f"Trusted-only mode: dropped untrusted text from {msg.sender_id}")
+                self._record_security_event("dropped_untrusted_text", msg.sender_id, {
+                    "msg_id": msg.msg_id,
+                    "reason": "trusted_only_private_chats",
+                })
                 return False
 
         return True
@@ -434,6 +459,9 @@ class MeshNode:
             "peer_id":   peer_id,
             "peer_name": msg.sender_name,
         })
+        self._record_security_event("seed_paired_confirmed", peer_id, {
+            "peer_name": msg.sender_name,
+        })
         logger.info(f"Seed-pair confirmation received from {peer_id}")
 
     # ── Mesh flooding / relay ────────────────────────────────────────────────
@@ -458,6 +486,9 @@ class MeshNode:
                 logger.warning(
                     f"Dropped mesh relay with invalid signature: {msg.msg_id} from {msg.sender_id}"
                 )
+                self._record_security_event("dropped_invalid_relay_signature", msg.sender_id, {
+                    "msg_id": msg.msg_id,
+                })
                 return
 
         inner_type = msg.payload.get("inner_type")
@@ -465,6 +496,9 @@ class MeshNode:
 
         if inner_payload.get("private") and not inner_payload.get("encrypted"):
             logger.warning(f"Dropped insecure private relay payload: {msg.msg_id}")
+            self._record_security_event("dropped_insecure_private_relay", msg.sender_id, {
+                "msg_id": msg.msg_id,
+            })
             return
 
         # Deliver locally
@@ -661,6 +695,9 @@ class MeshNode:
 
         if TRUSTED_ONLY_PRIVATE_CHATS and not self.crypto.is_trusted(peer_id):
             logger.info(f"Trusted-only mode: blocked outgoing text to untrusted peer {peer_id}")
+            self._record_security_event("blocked_outgoing_untrusted", peer_id, {
+                "reason": "trusted_only_private_chats",
+            })
             return None
 
         # Build message with E2E encryption
@@ -748,6 +785,7 @@ class MeshNode:
 
         self.crypto.establish_seed_session(peer_id, seed)
         self.discovery.mark_trusted(peer_id)
+        self._record_security_event("seed_paired_local", peer_id, {})
 
         # Notify peer that we've completed pairing on our side
         peer = self.discovery.get_peer(peer_id)
@@ -766,9 +804,11 @@ class MeshNode:
     def blacklist_peer(self, peer_id: str):
         """Permanently blacklist a peer (backend-level, messages are dropped)."""
         self._rate_limiter.blacklist_add(peer_id)
+        self._record_security_event("blacklist_added", peer_id, {})
 
     def unblacklist_peer(self, peer_id: str):
         self._rate_limiter.blacklist_remove(peer_id)
+        self._record_security_event("blacklist_removed", peer_id, {})
 
     def get_blacklist(self) -> list:
         return self._rate_limiter.get_blacklist()
@@ -776,6 +816,20 @@ class MeshNode:
     def get_banned_peers(self) -> dict:
         """Returns peers under temporary rate-limit ban and remaining seconds."""
         return self._rate_limiter.get_banned()
+
+    def get_security_events(self, limit: int = 200) -> list:
+        lim = max(1, min(2000, int(limit or 200)))
+        with self._security_lock:
+            events = list(self._security_events)
+        return events[-lim:]
+
+    def get_security_snapshot(self) -> dict:
+        return {
+            "trusted_only_private_chats": TRUSTED_ONLY_PRIVATE_CHATS,
+            "blacklist": self.get_blacklist(),
+            "banned": self.get_banned_peers(),
+            "events": self.get_security_events(100),
+        }
 
     # ── Call control ─────────────────────────────────────────────────────────
 

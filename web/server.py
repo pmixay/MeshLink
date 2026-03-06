@@ -54,6 +54,7 @@ def init_app(mesh_node: MeshNode):
     node.on("file_complete", lambda d: socketio.emit("file_complete", d))
     node.on("message_status", lambda d: socketio.emit("message_status", d))
     node.on("media_stats", lambda d: socketio.emit("media_stats", d))
+    node.on("security_event", lambda d: socketio.emit("security_event", d))
 
     # WebRTC signaling relay: TCP peer → local browser
     node.on("webrtc_offer",  lambda d: socketio.emit("webrtc_offer", d))
@@ -164,6 +165,21 @@ def api_blacklist_remove(peer_id):
 def api_banned():
     """Returns peers currently under temporary rate-limit ban."""
     return jsonify({"banned": node.get_banned_peers()})
+
+
+@app.route("/api/security/events")
+def api_security_events():
+    limit_raw = request.args.get("limit", "200")
+    try:
+        limit = int(limit_raw)
+    except Exception:
+        limit = 200
+    return jsonify({"events": node.get_security_events(limit)})
+
+
+@app.route("/api/security/snapshot")
+def api_security_snapshot():
+    return jsonify(node.get_security_snapshot())
 
 
 # ── Socket.IO events ────────────────────────────────────

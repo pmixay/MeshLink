@@ -164,6 +164,46 @@ python main.py --name "Charlie" --web-port 8082 --tcp-port 5171 --media-port 517
 
 ---
 
+## Reliability + Security Validation (Full Scope)
+
+### Automated tests
+
+Install test deps and run:
+
+```bash
+pip install -r requirements.txt
+python -m pytest -q
+```
+
+Current test suite covers:
+
+- `tests/test_messaging.py` — message framing, persistence replay, delivery/retry status behavior
+- `tests/test_node.py` — delivery status sync, trusted-only policy, relay signature-drop path, security snapshot API
+- `tests/test_file_transfer.py` — stale partial cleanup, invalid input handling, retry/failure path
+- `tests/test_media.py` — media metric helpers / stat shape
+- `tests/test_e2e_load.py` — e2e/load smoke for burst send and degraded retry pattern
+
+### Manual LAN degradation checks
+
+1. Start 2–3 nodes on one LAN (or one host with different ports).
+2. Send 100+ text messages quickly, verify statuses (`sent → delivered`, failures on disconnect).
+3. During 50–200 MB transfer, temporarily disable network on receiver and restore it.
+   - Transfer should resume from offset and finish with checksum validation.
+4. Start voice/video call and monitor live metrics panel:
+   - latency, loss, jitter, bitrate update continuously.
+5. Trigger security actions:
+   - enable trusted-only mode (`MESHLINK_TRUSTED_ONLY=1`),
+   - blacklist/unblacklist peer,
+   - send invalid relay packets (test harness or modified node).
+   - Observe admin security panel and `/api/security/snapshot` / `/api/security/events`.
+
+### Security admin observability endpoints
+
+- `GET /api/security/snapshot` — trusted-only flag, blacklist, banned peers, latest events
+- `GET /api/security/events?limit=200` — rolling security events stream for admin tools/UI
+
+---
+
 ## License
 
 MIT License — Use freely, modify freely, share freely.

@@ -125,25 +125,29 @@ class FileTransferManager:
     def _partial_cleanup_loop(self):
         while self._running:
             try:
-                now = time.time()
-                part_dir = self._partials_dir()
-                for name in os.listdir(part_dir):
-                    if not name.endswith(".part"):
-                        continue
-                    path = os.path.join(part_dir, name)
-                    try:
-                        st = os.stat(path)
-                    except Exception:
-                        continue
-                    if now - st.st_mtime > self.partial_ttl_seconds:
-                        try:
-                            os.remove(path)
-                            logger.info(f"Removed stale partial: {name}")
-                        except Exception:
-                            pass
+                self._cleanup_stale_partials_once()
             except Exception as e:
                 logger.debug(f"Partial cleanup error: {e}")
             time.sleep(300)
+
+    def _cleanup_stale_partials_once(self):
+        """One-pass stale partial cleanup (used by loop and tests)."""
+        now = time.time()
+        part_dir = self._partials_dir()
+        for name in os.listdir(part_dir):
+            if not name.endswith(".part"):
+                continue
+            path = os.path.join(part_dir, name)
+            try:
+                st = os.stat(path)
+            except Exception:
+                continue
+            if now - st.st_mtime > self.partial_ttl_seconds:
+                try:
+                    os.remove(path)
+                    logger.info(f"Removed stale partial: {name}")
+                except Exception:
+                    pass
 
     # ── Receiver ────────────────────────────────────────────
 
