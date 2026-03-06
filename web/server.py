@@ -54,9 +54,12 @@ def init_app(mesh_node: MeshNode):
     node.on("file_complete", lambda d: socketio.emit("file_complete", d))
 
     # WebRTC signaling relay: TCP peer → local browser
-    node.on("webrtc_offer", lambda d: socketio.emit("webrtc_offer", d))
+    node.on("webrtc_offer",  lambda d: socketio.emit("webrtc_offer", d))
     node.on("webrtc_answer", lambda d: socketio.emit("webrtc_answer", d))
-    node.on("webrtc_ice", lambda d: socketio.emit("webrtc_ice", d))
+    node.on("webrtc_ice",    lambda d: socketio.emit("webrtc_ice", d))
+
+    # Security events
+    node.on("seed_paired", lambda d: socketio.emit("seed_paired", d))
 
 
 # ── Routes ──────────────────────────────────────────────
@@ -109,6 +112,56 @@ def api_upload():
 @app.route("/downloads/<path:filename>")
 def download_file(filename):
     return send_from_directory(DOWNLOADS_DIR, filename)
+
+
+# ── Security / Seed-pairing / Blacklist API ──────────────
+
+@app.route("/api/seed/generate", methods=["POST"])
+def api_seed_generate():
+    """Generate a fresh 6-char pairing seed to show to the user."""
+    seed = node.generate_pairing_seed()
+    return jsonify({"seed": seed})
+
+
+@app.route("/api/seed/pair", methods=["POST"])
+def api_seed_pair():
+    """Activate seed-pairing with a specific peer."""
+    data    = request.get_json(force=True)
+    peer_id = data.get("peer_id", "")
+    seed    = data.get("seed", "").strip().upper()
+    if not peer_id or not seed:
+        return jsonify({"error": "peer_id and seed required"}), 400
+    ok = node.pair_with_seed(peer_id, seed)
+    if ok:
+        return jsonify({"status": "paired", "peer_id": peer_id})
+    return jsonify({"error": "Pairing failed (invalid seed or unknown peer)"}), 400
+
+
+@app.route("/api/security/blacklist", methods=["GET"])
+def api_blacklist_get():
+    return jsonify({"blacklist": node.get_blacklist()})
+
+
+@app.route("/api/security/blacklist", methods=["POST"])
+def api_blacklist_add():
+    data    = request.get_json(force=True)
+    peer_id = data.get("peer_id", "")
+    if not peer_id:
+        return jsonify({"error": "peer_id required"}), 400
+    node.blacklist_peer(peer_id)
+    return jsonify({"status": "blacklisted", "peer_id": peer_id})
+
+
+@app.route("/api/security/blacklist/<peer_id>", methods=["DELETE"])
+def api_blacklist_remove(peer_id):
+    node.unblacklist_peer(peer_id)
+    return jsonify({"status": "removed", "peer_id": peer_id})
+
+
+@app.route("/api/security/banned")
+def api_banned():
+    """Returns peers currently under temporary rate-limit ban."""
+    return jsonify({"banned": node.get_banned_peers()})
 
 
 # ── Socket.IO events ────────────────────────────────────
@@ -179,6 +232,30 @@ def on_reject_call(data):
 @socketio.on("end_call")
 def on_end_call(data=None):
     node.end_call()
+
+
+# ── WebRTC signaling: browser → TCP peer ────────────────
+
+@socketio.on("seed_pair")
+def on_seed_pair(data):
+    peer_id = data.get("peer_id", "")
+    seed    = data.get("seed", "").strip().upper()
+    if peer_id and seed:
+        ok = node.pair_with_seed(peer_id, seed)
+        emit("seed_pair_result", {"ok": ok, "peer_id": peer_id})
+
+
+@socketio.on("blacklist_peer")
+def on_blacklist_peer(data):
+    peer_id = data.get("peer_id", "")
+    action  = data.get("action", "add")   # "add" | "remove"
+    if not peer_id:
+        return
+    if action == "remove":
+        node.unblacklist_peer(peer_id)
+    else:
+        node.blacklist_peer(peer_id)
+    emit("blacklist_updated", {"peer_id": peer_id, "action": action})
 
 
 # ── WebRTC signaling: browser → TCP peer ────────────────
