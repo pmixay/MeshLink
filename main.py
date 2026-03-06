@@ -110,14 +110,44 @@ def main():
 
     # Import after config
     try:
-        from meshlink.core.node import MeshNode
+        from meshlink.core.node import MeshNode, ChatMessage
+        from meshlink.core.messaging import load_persisted_chats
         from meshlink.web.server import init_app, run_server
     except ImportError:
-        from core.node import MeshNode
+        from core.node import MeshNode, ChatMessage
+        from core.messaging import load_persisted_chats
         from web.server import init_app, run_server
 
     # ── Create and start the mesh node ──────────────────
     node = MeshNode()
+
+    # Restore local chat history before runtime starts.
+    try:
+        restored = load_persisted_chats()
+        restored_count = 0
+        with node._chat_lock:
+            for peer_id, entries in restored.items():
+                bucket = node.chats.setdefault(peer_id, [])
+                for entry in entries:
+                    chat_msg = ChatMessage(
+                        msg_id=entry.get("msg_id", ""),
+                        sender_id=entry.get("sender_id", ""),
+                        sender_name=entry.get("sender_name", "Unknown"),
+                        text=entry.get("text", ""),
+                        timestamp=float(entry.get("timestamp", 0.0) or 0.0),
+                        is_me=bool(entry.get("is_me", False)),
+                        msg_type=entry.get("msg_type", "text"),
+                        file_url=entry.get("file_url", ""),
+                        file_name=entry.get("file_name", ""),
+                        file_size=int(entry.get("file_size", 0) or 0),
+                    )
+                    bucket.append(chat_msg)
+                    restored_count += 1
+        if restored_count:
+            logger.info(f"Restored {restored_count} chat messages from local storage")
+    except Exception as e:
+        logger.warning(f"Failed to restore local chat history: {e}")
+
     node.start()
 
     # ── Initialize web server ───────────────────────────
