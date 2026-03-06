@@ -26,6 +26,7 @@ from .config import (
     DOWNLOADS_DIR, FILE_PORT,
 )
 from .messaging import persist_chat_entry
+from . import storage
 
 logger = logging.getLogger("meshlink.filetransfer")
 
@@ -95,6 +96,7 @@ class FileTransferManager:
         self.max_active_sends = 4
         self.partial_ttl_seconds = 24 * 3600
         self._send_semaphore = threading.Semaphore(self.max_active_sends)
+        self._active_sends = 0
 
     def start(self):
         self._running = True
@@ -117,10 +119,66 @@ class FileTransferManager:
         with self._lock:
             return [t.to_dict() for t in self.transfers.values()]
 
+    def get_send_diagnostics(self) -> dict:
+        with self._lock:
+            active = int(self._active_sends)
+        return {
+            "active_sends": active,
+            "max_active_sends": int(self.max_active_sends),
+            "available_send_slots": max(0, int(self.max_active_sends) - active),
+        }
+
     def _partials_dir(self) -> str:
         d = os.path.join(DOWNLOADS_DIR, ".partials")
         os.makedirs(d, exist_ok=True)
         return d
+
+    @staticmethod
+    def _atomic_write_json(path: str, obj: dict):
+        tmp = f"{path}.tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(obj, f, ensure_ascii=False)
+        os.replace(tmp, path)
+
+    @staticmethod
+    def _sha256_prefix(path: str, length: int) -> str:
+        length = max(0, int(length or 0))
+        sha = hashlib.sha256()
+        if length == 0:
+            return sha.hexdigest()
+        with open(path, "rb") as rf:
+            remaining = length
+            while remaining > 0:
+                chunk = rf.read(min(CHUNK_SIZE, remaining))
+                if not chunk:
+                    break
+                sha.update(chunk)
+                remaining -= len(chunk)
+        return sha.hexdigest()
+
+    def _manifest_path(self, file_id: str) -> str:
+        return os.path.join(self._partials_dir(), f"{file_id}.manifest.json")
+
+    def _load_manifest(self, file_id: str) -> dict:
+        path = self._manifest_path(file_id)
+        if not os.path.exists(path):
+            return {}
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+
+    def _save_manifest(self, file_id: str, data: dict):
+        self._atomic_write_json(self._manifest_path(file_id), data)
+
+    def _remove_manifest(self, file_id: str):
+        path = self._manifest_path(file_id)
+        if os.path.exists(path):
+            try:
+                os.remove(path)
+            except Exception:
+                pass
 
     def _partial_cleanup_loop(self):
         while self._running:
@@ -145,6 +203,9 @@ class FileTransferManager:
             if now - st.st_mtime > self.partial_ttl_seconds:
                 try:
                     os.remove(path)
+                    manifest = f"{os.path.splitext(path)[0]}.manifest.json"
+                    if os.path.exists(manifest):
+                        os.remove(manifest)
                     logger.info(f"Removed stale partial: {name}")
                 except Exception:
                     pass
@@ -192,6 +253,7 @@ class FileTransferManager:
 
             part_dir = self._partials_dir()
             part_path = os.path.join(part_dir, f"{file_id}.part")
+            manifest = self._load_manifest(file_id)
 
             existing = 0
             if resume_enabled and os.path.exists(part_path):
@@ -203,13 +265,49 @@ class FileTransferManager:
                         pass
                     existing = 0
 
+            if manifest:
+                mf_size = int(manifest.get("filesize", 0) or 0)
+                mf_name = str(manifest.get("filename", ""))
+                mf_offset = int(manifest.get("offset", 0) or 0)
+                if mf_size != int(filesize) or (mf_name and mf_name != filename) or mf_offset != existing:
+                    try:
+                        if os.path.exists(part_path):
+                            os.remove(part_path)
+                    except Exception:
+                        pass
+                    self._remove_manifest(file_id)
+                    existing = 0
+                    manifest = {}
+
+            remote_offset_sha = str(header.get("offset_sha256", ""))
+            if existing > 0 and remote_offset_sha:
+                local_prefix = self._sha256_prefix(part_path, existing)
+                if local_prefix != remote_offset_sha:
+                    logger.warning(f"Resume prefix SHA mismatch for {filename}, resetting partial")
+                    try:
+                        os.remove(part_path)
+                    except Exception:
+                        pass
+                    self._remove_manifest(file_id)
+                    existing = 0
+                    manifest = {}
+
+            existing_prefix_sha = ""
+            if existing > 0 and os.path.exists(part_path):
+                existing_prefix_sha = self._sha256_prefix(part_path, existing)
+                storage.incr_counter("metrics.file_resume_total", 1.0)
+
             transfer.progress = existing
 
             with self._lock:
                 self.transfers[file_id] = transfer
 
             # Accept
-            sock.sendall(json.dumps({"status": "accepted", "offset": existing}).encode() + b"\n")
+            sock.sendall(json.dumps({
+                "status": "accepted",
+                "offset": existing,
+                "offset_sha256": existing_prefix_sha,
+            }).encode() + b"\n")
             transfer.status = "active"
 
             sha = hashlib.sha256()
@@ -225,6 +323,14 @@ class FileTransferManager:
 
             with open(part_path, "ab" if existing > 0 else "wb") as f:
                 remaining = filesize - existing
+                self._save_manifest(file_id, {
+                    "file_id": file_id,
+                    "filename": filename,
+                    "filesize": int(filesize),
+                    "offset": int(existing),
+                    "sha256_prefix": sha.hexdigest(),
+                    "updated_at": time.time(),
+                })
                 while remaining > 0:
                     to_read = min(CHUNK_SIZE, remaining)
                     data = b""
@@ -245,6 +351,14 @@ class FileTransferManager:
                     now = time.time()
                     if now - last_emit >= 0.1:
                         last_emit = now
+                        self._save_manifest(file_id, {
+                            "file_id": file_id,
+                            "filename": filename,
+                            "filesize": int(filesize),
+                            "offset": int(transfer.progress),
+                            "sha256_prefix": sha.hexdigest(),
+                            "updated_at": now,
+                        })
                         if self.on_progress:
                             self.on_progress(transfer)
 
@@ -275,6 +389,7 @@ class FileTransferManager:
                 c += 1
 
             os.replace(part_path, filepath)
+            self._remove_manifest(file_id)
             transfer.saved_as = os.path.basename(filepath)
             transfer.status = "complete"
 
@@ -342,6 +457,8 @@ class FileTransferManager:
     def _send_worker(self, filepath: str, peer_ip: str,
                      peer_file_port: int, transfer: TransferInfo):
         self._send_semaphore.acquire()
+        with self._lock:
+            self._active_sends += 1
         last_error = None
         try:
             for attempt in range(1, self.max_retries + 1):
@@ -389,6 +506,16 @@ class FileTransferManager:
                                     break
                                 sha.update(piece)
                                 remaining_hash -= len(piece)
+
+                    # Optional backward-compatible offset checksum validation.
+                    remote_expected_offset_sha = str(resp.get("offset_sha256", ""))
+                    if remote_expected_offset_sha and sha.hexdigest() != remote_expected_offset_sha:
+                        logger.warning(
+                            f"Offset SHA mismatch for {transfer.filename}; restarting from zero"
+                        )
+                        offset = 0
+                        transfer.progress = 0
+                        sha = hashlib.sha256()
 
                     last_emit = time.time()
                     sock.settimeout(120)
@@ -460,4 +587,6 @@ class FileTransferManager:
 
             logger.error(f"Send failed: {transfer.filename}: {last_error}")
         finally:
+            with self._lock:
+                self._active_sends = max(0, int(self._active_sends) - 1)
             self._send_semaphore.release()

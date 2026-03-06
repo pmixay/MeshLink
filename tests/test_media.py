@@ -13,4 +13,8 @@ def test_stats_defaults_and_copy():
     assert "loss_percent" in stats
     assert "jitter_ms" in stats
     assert "bitrate_kbps" in stats
+    assert "uplink_latency_p50_ms" in stats
+    assert "uplink_latency_p95_ms" in stats
+    assert "downlink_jitter_p50_ms" in stats
+    assert "downlink_jitter_p95_ms" in stats
 

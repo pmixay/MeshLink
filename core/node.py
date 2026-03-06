@@ -15,6 +15,7 @@ import collections
 import time
 import logging
 import threading
+import random
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Callable
 
@@ -24,6 +25,9 @@ from .config import (
     MESH_TTL_DEFAULT, MESH_LRU_MAX_SIZE,
     RATE_LIMIT_MAX_MSGS, RATE_LIMIT_WINDOW, RATE_LIMIT_BAN_SECS,
     TRUSTED_ONLY_PRIVATE_CHATS,
+    TRUSTED_ONLY_TEXT, TRUSTED_ONLY_FILE, TRUSTED_ONLY_CALL,
+    SESSION_MAINTENANCE_INTERVAL_SECONDS,
+    MESH_RELAY_FANOUT_MIN, MESH_RELAY_FANOUT_MAX, MESH_RELAY_BACKPRESSURE_MAX_PENDING,
 )
 from .crypto import CryptoManager
 from .discovery import DiscoveryService, PeerInfo
@@ -35,6 +39,7 @@ from .messaging import (
 )
 from .file_transfer import FileTransferManager
 from .media import MediaEngine, CallState
+from . import storage
 
 logger = logging.getLogger("meshlink.node")
 
@@ -207,9 +212,120 @@ class MeshNode:
         self._rate_limiter = _RateLimiter()
         self._security_events = collections.deque(maxlen=1000)
         self._security_lock = threading.Lock()
+        self._running = False
+        self._started_at = time.time()
+        self._session_maintenance_thread: Optional[threading.Thread] = None
+
+        self._metrics_lock = threading.Lock()
+        self._metrics = {
+            "security_events_total": 0,
+            "relay_backpressure_drops_total": 0,
+            "session_rotations_total": 0,
+            "session_expired_total": 0,
+            "policy_drops_incoming_text_total": 0,
+            "policy_drops_incoming_call_total": 0,
+            "policy_drops_incoming_file_total": 0,
+            "policy_blocks_outgoing_text_total": 0,
+            "policy_blocks_outgoing_call_total": 0,
+            "policy_blocks_outgoing_file_total": 0,
+        }
 
         self._event_handlers: Dict[str, List[Callable]] = {}
+        self._relay_pressure_lock = threading.Lock()
+        self._relay_pending = 0
         self._setup_handlers()
+
+    def _inc_metric(self, key: str, delta: int = 1):
+        with self._metrics_lock:
+            self._metrics[key] = int(self._metrics.get(key, 0)) + int(delta)
+
+    def _trusted_policy_enabled(self, channel: str) -> bool:
+        if channel == "text":
+            return bool(TRUSTED_ONLY_TEXT or TRUSTED_ONLY_PRIVATE_CHATS)
+        if channel == "file":
+            return bool(TRUSTED_ONLY_FILE)
+        if channel == "call":
+            return bool(TRUSTED_ONLY_CALL)
+        return False
+
+    def _is_trusted_allowed(self, peer_id: str, channel: str, direction: str, msg_id: str = "") -> bool:
+        if not self._trusted_policy_enabled(channel):
+            return True
+        if self.crypto.is_trusted(peer_id):
+            return True
+
+        event_name = f"{direction}_{channel}_blocked_untrusted"
+        self._record_security_event(event_name, peer_id, {
+            "msg_id": msg_id,
+            "channel": channel,
+            "direction": direction,
+            "reason": f"trusted_only_{channel}",
+        })
+        if direction == "outgoing" and channel == "text":
+            # Backward-compatible security event name.
+            self._record_security_event("blocked_outgoing_untrusted", peer_id, {
+                "msg_id": msg_id,
+                "reason": "trusted_only_private_chats",
+            })
+
+        metric_map = {
+            ("incoming", "text"): "policy_drops_incoming_text_total",
+            ("incoming", "file"): "policy_drops_incoming_file_total",
+            ("incoming", "call"): "policy_drops_incoming_call_total",
+            ("outgoing", "text"): "policy_blocks_outgoing_text_total",
+            ("outgoing", "file"): "policy_blocks_outgoing_file_total",
+            ("outgoing", "call"): "policy_blocks_outgoing_call_total",
+        }
+        mk = metric_map.get((direction, channel))
+        if mk:
+            self._inc_metric(mk, 1)
+        return False
+
+    def _on_peer_activity(self, peer_id: str):
+        if not peer_id:
+            return
+        if self.crypto.has_session(peer_id) and not self.crypto.check_session_ttl(peer_id):
+            self._record_security_event("session_expired", peer_id, {})
+            self._inc_metric("session_expired_total", 1)
+            return
+        if self.crypto.should_rotate_session(peer_id):
+            if self.crypto.rotate_session(peer_id):
+                self._record_security_event("session_rotated", peer_id, {"trigger": "peer_activity"})
+                self._inc_metric("session_rotations_total", 1)
+        self.crypto.touch_session(peer_id)
+
+    def _session_maintenance_loop(self):
+        interval = max(1.0, float(SESSION_MAINTENANCE_INTERVAL_SECONDS))
+        while self._running:
+            try:
+                result = self.crypto.maintain_sessions()
+                for pid in result.get("expired", []):
+                    self._record_security_event("session_expired", pid, {"trigger": "maintenance"})
+                    self._inc_metric("session_expired_total", 1)
+                for pid in result.get("rotated", []):
+                    self._record_security_event("session_rotated", pid, {"trigger": "maintenance"})
+                    self._inc_metric("session_rotations_total", 1)
+            except Exception as e:
+                logger.debug(f"Session maintenance error: {e}")
+            time.sleep(interval)
+
+    def _upsert_chat_message(self, peer_id: str, chat_msg: ChatMessage) -> bool:
+        """Insert or update a chat message by msg_id. Returns True if inserted/newly updated path should emit."""
+        if not peer_id or not chat_msg.msg_id:
+            return False
+        inserted = False
+        with self._chat_lock:
+            bucket = self.chats.setdefault(peer_id, [])
+            for item in bucket:
+                if item.msg_id == chat_msg.msg_id:
+                    if chat_msg.status and (not item.status or item.status != chat_msg.status):
+                        item.status = chat_msg.status
+                    if chat_msg.text and not item.text:
+                        item.text = chat_msg.text
+                    return False
+            bucket.append(chat_msg)
+            inserted = True
+        return inserted
 
     def _record_security_event(self, event_type: str, peer_id: str = "", details: Optional[dict] = None):
         event = {
@@ -220,6 +336,9 @@ class MeshNode:
         }
         with self._security_lock:
             self._security_events.append(event)
+        self._inc_metric("security_events_total", 1)
+        if event_type == "relay_backpressure_drop":
+            self._inc_metric("relay_backpressure_drops_total", 1)
         self._emit("security_event", event)
 
     # ── Handler wiring ───────────────────────────────────────────────────────
@@ -264,20 +383,22 @@ class MeshNode:
                     updated = True
                     break
 
+        persist_chat_entry({
+            "kind": "status_update",
+            "peer_id": peer_id,
+            "msg_id": msg_id,
+            "status": status,
+            "timestamp": time.time(),
+        })
+
         if updated:
-            persist_chat_entry({
-                "kind": "status_update",
-                "peer_id": peer_id,
-                "msg_id": msg_id,
-                "status": status,
-                "timestamp": time.time(),
-            })
             self._emit("message_status", {
                 "peer_id": peer_id,
                 "msg_id": msg_id,
                 "status": status,
                 "timestamp": data.get("timestamp", time.time()),
             })
+        self._emit("network_diagnostics", self.get_network_diagnostics())
 
     # ── Event system ─────────────────────────────────────────────────────────
 
@@ -295,14 +416,22 @@ class MeshNode:
 
     def start(self):
         logger.info(f"Starting MeshLink: {NODE_NAME} ({NODE_ID}) @ {LOCAL_IP}")
+        self._running = True
         self.discovery.start()
         self.msg_server.start()
         self.file_mgr.start()
         self.media.start()
         threading.Thread(target=self._media_stats_loop, daemon=True, name="media-stats-loop").start()
+        self._session_maintenance_thread = threading.Thread(
+            target=self._session_maintenance_loop,
+            daemon=True,
+            name="session-maintenance-loop",
+        )
+        self._session_maintenance_thread.start()
         logger.info("All subsystems started.")
 
     def stop(self):
+        self._running = False
         self.media.stop()
         self.file_mgr.stop()
         self.msg_server.stop()
@@ -337,13 +466,9 @@ class MeshNode:
         if msg_id:
             self._seen_msgs.add(msg_id)
 
-        if TRUSTED_ONLY_PRIVATE_CHATS and msg.msg_type == MsgType.TEXT:
-            if not self.crypto.is_trusted(msg.sender_id):
+        if msg.msg_type == MsgType.TEXT:
+            if not self._is_trusted_allowed(msg.sender_id, "text", "incoming", msg_id=msg.msg_id):
                 logger.info(f"Trusted-only mode: dropped untrusted text from {msg.sender_id}")
-                self._record_security_event("dropped_untrusted_text", msg.sender_id, {
-                    "msg_id": msg.msg_id,
-                    "reason": "trusted_only_private_chats",
-                })
                 return False
 
         return True
@@ -374,6 +499,7 @@ class MeshNode:
     def _on_text_message(self, msg: Message):
         if not self._security_check(msg):
             return
+        self._on_peer_activity(msg.sender_id)
 
         # Decrypt if encrypted
         text    = msg.payload.get("text", "")
@@ -411,13 +537,14 @@ class MeshNode:
             encrypted=   was_enc,
             status=      "delivered",
         )
-        with self._chat_lock:
-            self.chats.setdefault(msg.sender_id, []).append(chat_msg)
-        self._emit("message", chat_msg.to_dict())
+        is_new = self._upsert_chat_message(msg.sender_id, chat_msg)
+        if is_new:
+            self._emit("message", chat_msg.to_dict())
 
     def _on_key_exchange(self, msg: Message):
         if not self._security_check(msg):
             return
+        self._on_peer_activity(msg.sender_id)
         pub_key  = msg.payload.get("public_key",  "")
         sign_key = msg.payload.get("signing_key", "")
         if pub_key:
@@ -428,6 +555,9 @@ class MeshNode:
     def _on_call_invite(self, msg: Message):
         if not self._security_check(msg):
             return
+        if not self._is_trusted_allowed(msg.sender_id, "call", "incoming", msg_id=msg.msg_id):
+            return
+        self._on_peer_activity(msg.sender_id)
         self.current_call_peer = msg.sender_id
         self._emit("call_incoming", {
             "peer_id":   msg.sender_id,
@@ -475,6 +605,7 @@ class MeshNode:
         """
         if not self._security_check(msg):
             return
+        self._on_peer_activity(msg.sender_id)
 
         if msg.signature:
             relay_ok = self.crypto.verify_from(
@@ -503,6 +634,8 @@ class MeshNode:
 
         # Deliver locally
         if inner_type == MsgType.TEXT:
+            if not self._is_trusted_allowed(msg.sender_id, "text", "incoming", msg_id=msg.msg_id):
+                return
             text = inner_payload.get("text", "")
             chat_msg = ChatMessage(
                 msg_id=      msg.msg_id,
@@ -511,10 +644,11 @@ class MeshNode:
                 text=        text,
                 timestamp=   msg.timestamp,
                 is_me=       False,
+                status=      "delivered",
             )
-            with self._chat_lock:
-                self.chats.setdefault(msg.sender_id, []).append(chat_msg)
-            self._emit("message", chat_msg.to_dict())
+            is_new = self._upsert_chat_message(msg.sender_id, chat_msg)
+            if is_new:
+                self._emit("message", chat_msg.to_dict())
 
         # Relay to other peers if TTL allows
         if msg.ttl > 1:
@@ -526,7 +660,18 @@ class MeshNode:
         Decrements TTL by 1.
         """
         peers = self.discovery.get_peers()
+        pending_outbox = storage.outbox_pending_count()
+        with self._relay_pressure_lock:
+            pressure = self._relay_pending
+        if pending_outbox + pressure >= max(200, int(MESH_RELAY_BACKPRESSURE_MAX_PENDING)):
+            self._record_security_event("relay_backpressure_drop", msg.sender_id, {
+                "msg_id": msg.msg_id,
+                "pending_outbox": pending_outbox,
+                "relay_pending": pressure,
+            })
+            return
         already_visited = set(msg.relay_path)
+        candidates = []
 
         for peer_dict in peers:
             pid = peer_dict["peer_id"]
@@ -535,6 +680,21 @@ class MeshNode:
             peer = self.discovery.get_peer(pid)
             if not peer:
                 continue
+            candidates.append((pid, peer))
+
+        if not candidates:
+            return
+
+        # Adaptive fanout: less pressure -> larger fanout.
+        cap_min = max(1, int(MESH_RELAY_FANOUT_MIN))
+        cap_max = max(cap_min, int(MESH_RELAY_FANOUT_MAX))
+        ratio = min(1.0, (pending_outbox + pressure) / float(max(1, int(MESH_RELAY_BACKPRESSURE_MAX_PENDING))))
+        fanout = int(round(cap_max - (cap_max - cap_min) * ratio))
+        fanout = max(cap_min, min(cap_max, fanout, len(candidates)))
+        random.shuffle(candidates)
+        selected = candidates[:fanout]
+
+        for pid, peer in selected:
 
             relay_msg = Message(
                 msg_type=    MsgType.MESH_RELAY,
@@ -547,7 +707,11 @@ class MeshNode:
                 relay_path=  msg.relay_path + [NODE_ID],
             )
             relay_msg.signature = self.crypto.sign(relay_msg.canonical_bytes())
+            with self._relay_pressure_lock:
+                self._relay_pending += 1
             self.msg_server.send_to_peer(peer.ip, peer.tcp_port, relay_msg, pid)
+            with self._relay_pressure_lock:
+                self._relay_pending = max(0, self._relay_pending - 1)
 
     def _send_mesh_text(self, text: str, origin_msg_id: str = ""):
         """
@@ -581,6 +745,7 @@ class MeshNode:
             try:
                 stats = self.media.get_stats()
                 self._emit("media_stats", stats)
+                self._emit("network_diagnostics", self.get_network_diagnostics())
                 time.sleep(1.0)
             except Exception:
                 time.sleep(1.0)
@@ -629,6 +794,8 @@ class MeshNode:
     def _on_file_complete(self, transfer):
         self._emit("file_complete", transfer.to_dict())
         if transfer.direction == "recv":
+            if not self._is_trusted_allowed(transfer.peer_id, "file", "incoming", msg_id=f"file-{transfer.file_id}"):
+                return
             saved = transfer.saved_as or transfer.filename
             chat_msg = ChatMessage(
                 msg_id=      f"file-{transfer.file_id}",
@@ -675,6 +842,9 @@ class MeshNode:
             "encryption":  self.crypto.keypair.private_key is not None,
             "signing_key": self.crypto.signing_key_b64,
             "trusted_only_private_chats": TRUSTED_ONLY_PRIVATE_CHATS,
+            "trusted_only_text": bool(TRUSTED_ONLY_TEXT or TRUSTED_ONLY_PRIVATE_CHATS),
+            "trusted_only_file": TRUSTED_ONLY_FILE,
+            "trusted_only_call": TRUSTED_ONLY_CALL,
         }
 
     def get_peers(self) -> list:
@@ -693,11 +863,9 @@ class MeshNode:
         if not peer:
             return None
 
-        if TRUSTED_ONLY_PRIVATE_CHATS and not self.crypto.is_trusted(peer_id):
+        self._on_peer_activity(peer_id)
+        if not self._is_trusted_allowed(peer_id, "text", "outgoing"):
             logger.info(f"Trusted-only mode: blocked outgoing text to untrusted peer {peer_id}")
-            self._record_security_event("blocked_outgoing_untrusted", peer_id, {
-                "reason": "trusted_only_private_chats",
-            })
             return None
 
         # Build message with E2E encryption
@@ -765,6 +933,9 @@ class MeshNode:
         peer = self.discovery.get_peer(peer_id)
         if not peer:
             return None
+        self._on_peer_activity(peer_id)
+        if not self._is_trusted_allowed(peer_id, "file", "outgoing"):
+            return None
         return self.file_mgr.send_file(filepath, peer.ip, peer.file_port, peer_id)
 
     # ── Seed-pairing API ─────────────────────────────────────────────────────
@@ -824,11 +995,107 @@ class MeshNode:
         return events[-lim:]
 
     def get_security_snapshot(self) -> dict:
+        with self._metrics_lock:
+            m = dict(self._metrics)
+        session_snapshot = self.crypto.get_session_snapshot()
         return {
             "trusted_only_private_chats": TRUSTED_ONLY_PRIVATE_CHATS,
+            "trusted_only_text": bool(TRUSTED_ONLY_TEXT or TRUSTED_ONLY_PRIVATE_CHATS),
+            "trusted_only_file": TRUSTED_ONLY_FILE,
+            "trusted_only_call": TRUSTED_ONLY_CALL,
             "blacklist": self.get_blacklist(),
             "banned": self.get_banned_peers(),
+            "session_keys": session_snapshot,
+            "session_keys_active": sum(1 for _, x in session_snapshot.items() if x.get("active")),
+            "session_rotations_total": m.get("session_rotations_total", 0),
+            "session_expired_total": m.get("session_expired_total", 0),
             "events": self.get_security_events(100),
+        }
+
+    def is_ready(self) -> bool:
+        if self.discovery is None or self.msg_server is None or self.file_mgr is None or self.media is None:
+            return False
+        return bool(self._running and self.msg_server._running and self.file_mgr._running and self.media._running)
+
+    def get_health_snapshot(self) -> dict:
+        return {
+            "status": "ok",
+            "node_id": NODE_ID,
+            "uptime_seconds": max(0.0, time.time() - self._started_at),
+            "started_at": self._started_at,
+            "active_peers": len(self.discovery.get_peers()),
+        }
+
+    def get_metrics_snapshot(self) -> dict:
+        with self._metrics_lock:
+            base = dict(self._metrics)
+        counters = storage.get_counters("metrics.")
+        peers = self.discovery.get_peers()
+        with self._relay_pressure_lock:
+            relay_pending = self._relay_pending
+
+        latency_sum = float(counters.get("metrics.delivery_latency_sum_seconds", 0.0))
+        latency_count = float(counters.get("metrics.delivery_latency_count", 0.0))
+
+        snap = {
+            "active_peers": len(peers),
+            "relay_pending": int(relay_pending),
+            "relay_drops_total": int(base.get("relay_backpressure_drops_total", 0)),
+            "outbox_pending": int(storage.outbox_pending_count()),
+            "session_rotations_total": int(base.get("session_rotations_total", 0)),
+            "session_expired_total": int(base.get("session_expired_total", 0)),
+            "security_events_total": int(base.get("security_events_total", 0)),
+            "trusted_policy_incoming_text_drops_total": int(base.get("policy_drops_incoming_text_total", 0)),
+            "trusted_policy_incoming_file_drops_total": int(base.get("policy_drops_incoming_file_total", 0)),
+            "trusted_policy_incoming_call_drops_total": int(base.get("policy_drops_incoming_call_total", 0)),
+            "trusted_policy_outgoing_text_blocks_total": int(base.get("policy_blocks_outgoing_text_total", 0)),
+            "trusted_policy_outgoing_file_blocks_total": int(base.get("policy_blocks_outgoing_file_total", 0)),
+            "trusted_policy_outgoing_call_blocks_total": int(base.get("policy_blocks_outgoing_call_total", 0)),
+            "delivery_retry_total": float(counters.get("metrics.delivery_retry_total", 0.0)),
+            "delivery_fail_total": float(counters.get("metrics.delivery_fail_total", 0.0)),
+            "delivery_latency_sum_seconds": latency_sum,
+            "delivery_latency_count": latency_count,
+            "delivery_latency_avg_seconds": (latency_sum / latency_count) if latency_count > 0 else 0.0,
+            "file_resume_total": float(counters.get("metrics.file_resume_total", 0.0)),
+        }
+        return snap
+
+    def get_network_diagnostics(self) -> dict:
+        counters = storage.get_counters("metrics.")
+        metrics = self.get_metrics_snapshot()
+        media = self.media.get_stats()
+        sends = self.file_mgr.get_send_diagnostics()
+        retry_total = float(counters.get("metrics.delivery_retry_total", 0.0))
+        fail_total = float(counters.get("metrics.delivery_fail_total", 0.0))
+        latency_count = float(counters.get("metrics.delivery_latency_count", 0.0))
+        fail_reason = "none"
+        if fail_total > 0:
+            fail_reason = "delivery_failed_or_unreachable"
+        elif retry_total > 0:
+            fail_reason = "retries_in_progress"
+
+        return {
+            "delivery": {
+                "retry_total": retry_total,
+                "fail_total": fail_total,
+                "latency_count": latency_count,
+                "failed_reason": fail_reason,
+            },
+            "queue": {
+                "outbox_backlog": int(metrics.get("outbox_pending", 0)),
+                "relay_pending": int(metrics.get("relay_pending", 0)),
+                "relay_drops_total": int(metrics.get("relay_drops_total", 0)),
+            },
+            "file_transfer": sends,
+            "media": {
+                "uplink_bitrate_kbps": float(media.get("uplink_bitrate_kbps", 0.0)),
+                "downlink_bitrate_kbps": float(media.get("downlink_bitrate_kbps", 0.0)),
+                "uplink_jitter_p95_ms": float(media.get("uplink_jitter_p95_ms", 0.0)),
+                "downlink_jitter_p95_ms": float(media.get("downlink_jitter_p95_ms", 0.0)),
+                "downlink_loss_percent": float(media.get("loss_percent", 0.0)),
+            },
+            "active_peers": int(metrics.get("active_peers", 0)),
+            "ts": time.time(),
         }
 
     # ── Call control ─────────────────────────────────────────────────────────
@@ -836,6 +1103,9 @@ class MeshNode:
     def start_call(self, peer_id: str, call_type: str = "audio") -> bool:
         peer = self.discovery.get_peer(peer_id)
         if not peer:
+            return False
+        self._on_peer_activity(peer_id)
+        if not self._is_trusted_allowed(peer_id, "call", "outgoing"):
             return False
         self.current_call_peer = peer_id
         msg     = make_call_invite(call_type)

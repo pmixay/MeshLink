@@ -5,7 +5,6 @@ Audio: raw PCM → opus-like compression via audioop
 Video: JPEG-compressed frames over UDP
 """
 
-import io
 import time
 import struct
 import socket
@@ -13,7 +12,7 @@ import logging
 import threading
 import collections
 from enum import IntEnum
-from typing import Callable, Optional
+from typing import Callable, Optional, Deque, Dict, Tuple
 
 from .config import (
     NODE_ID, MEDIA_PORT,
@@ -61,8 +60,27 @@ class MediaEngine:
         self._rx_lost_packets = 0
         self._jitter_ewma_ms = 0.0
         self._latency_ewma_ms = 0.0
+        self._tx_jitter_ewma_ms = 0.0
+        self._tx_latency_ewma_ms = 0.0
         self._bitrate_window = collections.deque()  # (recv_time, packet_size)
+        self._tx_bitrate_window = collections.deque()  # (send_time, packet_size)
         self._bitrate_window_seconds = 2.0
+        self._percentile_window_seconds = 15.0
+
+        self._down_latency_samples: Deque[Tuple[float, float]] = collections.deque()
+        self._down_jitter_samples: Deque[Tuple[float, float]] = collections.deque()
+        self._up_latency_samples: Deque[Tuple[float, float]] = collections.deque()
+        self._up_jitter_samples: Deque[Tuple[float, float]] = collections.deque()
+
+        self._last_send_wall: Optional[float] = None
+        self._last_send_interval: Optional[float] = None
+
+        # Audio receive path: jitter buffer + packet reordering
+        self._audio_reorder: Dict[int, Tuple[bytes, int, float]] = {}
+        self._audio_expected_seq: Optional[int] = None
+        self._audio_jitter_buffer_ms = 40.0
+        self._audio_max_wait_ms = 120.0
+        self._audio_max_buffer_packets = 64
         self._stats_lock = threading.Lock()
 
         # Callbacks for received media
@@ -80,7 +98,104 @@ class MediaEngine:
             "loss_percent": 0.0,
             "jitter_ms": 0.0,
             "bitrate_kbps": 0.0,
+            # Directional metrics (new, backward-compatible additions)
+            "uplink_packets_sent": 0,
+            "uplink_bytes_sent": 0,
+            "uplink_latency_ms": 0.0,
+            "uplink_latency_p50_ms": 0.0,
+            "uplink_latency_p95_ms": 0.0,
+            "uplink_jitter_ms": 0.0,
+            "uplink_jitter_p50_ms": 0.0,
+            "uplink_jitter_p95_ms": 0.0,
+            "uplink_bitrate_kbps": 0.0,
+            "downlink_packets_recv": 0,
+            "downlink_bytes_recv": 0,
+            "downlink_latency_ms": 0.0,
+            "downlink_latency_p50_ms": 0.0,
+            "downlink_latency_p95_ms": 0.0,
+            "downlink_jitter_ms": 0.0,
+            "downlink_jitter_p50_ms": 0.0,
+            "downlink_jitter_p95_ms": 0.0,
+            "downlink_bitrate_kbps": 0.0,
         }
+
+    @staticmethod
+    def _percentile(values: list[float], p: float) -> float:
+        if not values:
+            return 0.0
+        vals = sorted(float(v) for v in values)
+        if len(vals) == 1:
+            return vals[0]
+        idx = (len(vals) - 1) * max(0.0, min(1.0, p))
+        lo = int(idx)
+        hi = min(lo + 1, len(vals) - 1)
+        frac = idx - lo
+        return vals[lo] * (1.0 - frac) + vals[hi] * frac
+
+    def _prune_samples(self, now: float, dq: Deque[Tuple[float, float]]):
+        cutoff = now - self._percentile_window_seconds
+        while dq and dq[0][0] < cutoff:
+            dq.popleft()
+
+    def _refresh_percentiles_locked(self, now: float):
+        self._prune_samples(now, self._down_latency_samples)
+        self._prune_samples(now, self._down_jitter_samples)
+        self._prune_samples(now, self._up_latency_samples)
+        self._prune_samples(now, self._up_jitter_samples)
+
+        dl = [v for _, v in self._down_latency_samples]
+        dj = [v for _, v in self._down_jitter_samples]
+        ul = [v for _, v in self._up_latency_samples]
+        uj = [v for _, v in self._up_jitter_samples]
+
+        self.stats["downlink_latency_p50_ms"] = round(self._percentile(dl, 0.50), 2)
+        self.stats["downlink_latency_p95_ms"] = round(self._percentile(dl, 0.95), 2)
+        self.stats["downlink_jitter_p50_ms"] = round(self._percentile(dj, 0.50), 2)
+        self.stats["downlink_jitter_p95_ms"] = round(self._percentile(dj, 0.95), 2)
+        self.stats["uplink_latency_p50_ms"] = round(self._percentile(ul, 0.50), 2)
+        self.stats["uplink_latency_p95_ms"] = round(self._percentile(ul, 0.95), 2)
+        self.stats["uplink_jitter_p50_ms"] = round(self._percentile(uj, 0.50), 2)
+        self.stats["uplink_jitter_p95_ms"] = round(self._percentile(uj, 0.95), 2)
+
+    def _record_uplink_stats_locked(self, packet_size: int):
+        now = time.time()
+
+        # Uplink latency in this UDP path is local enqueue-to-send (near-zero by design).
+        latency_now = 0.0
+        if self._tx_latency_ewma_ms <= 0.0:
+            self._tx_latency_ewma_ms = latency_now
+        else:
+            self._tx_latency_ewma_ms = (self._tx_latency_ewma_ms * 0.8) + (latency_now * 0.2)
+
+        jitter_now = 0.0
+        if self._last_send_wall is not None:
+            interval = max(0.0, now - self._last_send_wall)
+            if self._last_send_interval is not None:
+                jitter_now = abs((interval - self._last_send_interval) * 1000.0)
+            self._last_send_interval = interval
+        self._last_send_wall = now
+
+        self._tx_jitter_ewma_ms = self._tx_jitter_ewma_ms + ((jitter_now - self._tx_jitter_ewma_ms) / 16.0)
+
+        self._up_latency_samples.append((now, latency_now))
+        self._up_jitter_samples.append((now, jitter_now))
+
+        self._tx_bitrate_window.append((now, int(packet_size)))
+        cutoff = now - self._bitrate_window_seconds
+        while self._tx_bitrate_window and self._tx_bitrate_window[0][0] < cutoff:
+            self._tx_bitrate_window.popleft()
+
+        if len(self._tx_bitrate_window) >= 2:
+            t0 = self._tx_bitrate_window[0][0]
+            span = max(0.2, now - t0)
+            bytes_in_window = sum(sz for _, sz in self._tx_bitrate_window)
+            self.stats["uplink_bitrate_kbps"] = round((bytes_in_window * 8.0 / 1000.0) / span, 2)
+        elif self._tx_bitrate_window:
+            self.stats["uplink_bitrate_kbps"] = round((self._tx_bitrate_window[0][1] * 8.0) / 1000.0, 2)
+
+        self.stats["uplink_latency_ms"] = round(self._tx_latency_ewma_ms, 2)
+        self.stats["uplink_jitter_ms"] = round(self._tx_jitter_ewma_ms, 2)
+        self._refresh_percentiles_locked(now)
 
     # ── Socket management ───────────────────────────────────
 
@@ -121,7 +236,18 @@ class MediaEngine:
         self._rx_lost_packets = 0
         self._jitter_ewma_ms = 0.0
         self._latency_ewma_ms = 0.0
+        self._tx_jitter_ewma_ms = 0.0
+        self._tx_latency_ewma_ms = 0.0
         self._bitrate_window.clear()
+        self._tx_bitrate_window.clear()
+        self._down_latency_samples.clear()
+        self._down_jitter_samples.clear()
+        self._up_latency_samples.clear()
+        self._up_jitter_samples.clear()
+        self._last_send_wall = None
+        self._last_send_interval = None
+        self._audio_reorder.clear()
+        self._audio_expected_seq = None
         logger.info(f"Call started → {peer_ip}:{peer_media_port}")
         if self.on_call_state_change:
             self.on_call_state_change(CallState.ACTIVE)
@@ -161,6 +287,9 @@ class MediaEngine:
             with self._stats_lock:
                 self.stats["packets_sent"] += 1
                 self.stats["bytes_sent"] += len(packet)
+                self.stats["uplink_packets_sent"] += 1
+                self.stats["uplink_bytes_sent"] += len(packet)
+                self._record_uplink_stats_locked(len(packet))
         except Exception as e:
             logger.debug(f"Audio send error: {e}")
 
@@ -186,6 +315,9 @@ class MediaEngine:
                 with self._stats_lock:
                     self.stats["packets_sent"] += 1
                     self.stats["bytes_sent"] += len(packet)
+                    self.stats["uplink_packets_sent"] += 1
+                    self.stats["uplink_bytes_sent"] += len(packet)
+                    self._record_uplink_stats_locked(len(packet))
             except Exception as e:
                 logger.debug(f"Video send error: {e}")
             offset += MAX_UDP_PAYLOAD
@@ -194,6 +326,48 @@ class MediaEngine:
         if self._peer_addr:
             packet = self._make_packet(MEDIA_CONTROL, data)
             self._sock.sendto(packet, self._peer_addr)
+            with self._stats_lock:
+                self.stats["packets_sent"] += 1
+                self.stats["bytes_sent"] += len(packet)
+                self.stats["uplink_packets_sent"] += 1
+                self.stats["uplink_bytes_sent"] += len(packet)
+                self._record_uplink_stats_locked(len(packet))
+
+    def _drain_audio_reorder(self, now_wall: float, force: bool = False):
+        while True:
+            if self._audio_expected_seq is None:
+                if not self._audio_reorder:
+                    return
+                self._audio_expected_seq = min(self._audio_reorder.keys())
+
+            cur = self._audio_reorder.get(int(self._audio_expected_seq))
+            if cur is None:
+                if not self._audio_reorder:
+                    return
+                oldest_wait = (now_wall - min(x[2] for x in self._audio_reorder.values())) * 1000.0
+                if oldest_wait < self._audio_max_wait_ms and not force:
+                    return
+                # Missing expected sequence for too long: jump to earliest available.
+                self._audio_expected_seq = min(self._audio_reorder.keys())
+                cur = self._audio_reorder.get(int(self._audio_expected_seq))
+                if cur is None:
+                    return
+
+            payload, ts, arrived = cur
+            buffered_ms = (now_wall - arrived) * 1000.0
+            if (buffered_ms < self._audio_jitter_buffer_ms) and not force and len(self._audio_reorder) < (self._audio_max_buffer_packets // 2):
+                return
+
+            del self._audio_reorder[int(self._audio_expected_seq)]
+            self._audio_expected_seq = (int(self._audio_expected_seq) + 1) & 0xFFFFFFFF
+            if self.on_audio_frame:
+                self.on_audio_frame(payload, ts / 1000.0)
+
+            # Hard bound for memory in pathological reorder/loss conditions.
+            if len(self._audio_reorder) > self._audio_max_buffer_packets:
+                while len(self._audio_reorder) > self._audio_max_buffer_packets:
+                    k = min(self._audio_reorder.keys())
+                    del self._audio_reorder[k]
 
     # ── Receiving ───────────────────────────────────────────
 
@@ -229,6 +403,8 @@ class MediaEngine:
             with self._stats_lock:
                 self.stats["packets_recv"] += 1
                 self.stats["bytes_recv"] += len(data)
+                self.stats["downlink_packets_recv"] += 1
+                self.stats["downlink_bytes_recv"] += len(data)
                 latency_now = max(0.0, float(now_ms - ts))
                 if self._latency_ewma_ms <= 0.0:
                     self._latency_ewma_ms = latency_now
@@ -236,6 +412,8 @@ class MediaEngine:
                     # Быстрый EWMA для визуально стабильного WebRTC-подобного графика.
                     self._latency_ewma_ms = (self._latency_ewma_ms * 0.8) + (latency_now * 0.2)
                 self.stats["latency_ms"] = round(self._latency_ewma_ms, 2)
+                self.stats["downlink_latency_ms"] = round(self._latency_ewma_ms, 2)
+                self._down_latency_samples.append((now_wall, latency_now))
 
                 # Packet loss estimate using cumulative expected/received based on seq gaps.
                 if self._last_seq is None:
@@ -259,6 +437,8 @@ class MediaEngine:
                     d_ms = abs((recv_delta - sent_delta) * 1000.0)
                     self._jitter_ewma_ms = self._jitter_ewma_ms + ((d_ms - self._jitter_ewma_ms) / 16.0)
                     self.stats["jitter_ms"] = round(self._jitter_ewma_ms, 2)
+                    self.stats["downlink_jitter_ms"] = round(self._jitter_ewma_ms, 2)
+                    self._down_jitter_samples.append((now_wall, d_ms))
                 self._last_recv_ts_ms = ts
                 self._last_recv_wall = now_wall
 
@@ -272,8 +452,12 @@ class MediaEngine:
                     span = max(0.2, now_wall - t0)
                     bytes_in_window = sum(sz for _, sz in self._bitrate_window)
                     self.stats["bitrate_kbps"] = round((bytes_in_window * 8.0 / 1000.0) / span, 2)
+                    self.stats["downlink_bitrate_kbps"] = self.stats["bitrate_kbps"]
                 elif self._bitrate_window:
                     self.stats["bitrate_kbps"] = round((self._bitrate_window[0][1] * 8.0) / 1000.0, 2)
+                    self.stats["downlink_bitrate_kbps"] = self.stats["bitrate_kbps"]
+
+                self._refresh_percentiles_locked(now_wall)
 
             # Auto-accept incoming media as a call
             if self._call_state != CallState.ACTIVE and ptype in (MEDIA_AUDIO, MEDIA_VIDEO):
@@ -283,8 +467,10 @@ class MediaEngine:
                     self.on_call_state_change(CallState.ACTIVE)
 
             if ptype == MEDIA_AUDIO:
-                if self.on_audio_frame:
-                    self.on_audio_frame(payload, ts / 1000.0)
+                self._audio_reorder[int(seq)] = (payload, ts, now_wall)
+                if self._audio_expected_seq is None:
+                    self._audio_expected_seq = int(seq)
+                self._drain_audio_reorder(now_wall)
 
             elif ptype == MEDIA_VIDEO:
                 # Reassemble fragments
@@ -313,6 +499,7 @@ class MediaEngine:
 
             elif ptype == MEDIA_CONTROL:
                 if payload == b"END_CALL":
+                    self._drain_audio_reorder(now_wall, force=True)
                     self._call_state = CallState.ENDED
                     self._peer_addr = None
                     if self.on_call_state_change:

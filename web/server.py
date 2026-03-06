@@ -20,6 +20,66 @@ except ImportError:
 
 logger = logging.getLogger("meshlink.web")
 
+
+def _prometheus_text(metrics: dict) -> str:
+    lines = [
+        "# HELP meshlink_active_peers Number of currently active peers.",
+        "# TYPE meshlink_active_peers gauge",
+        f"meshlink_active_peers {float(metrics.get('active_peers', 0))}",
+        "# HELP meshlink_outbox_pending Pending outbox messages.",
+        "# TYPE meshlink_outbox_pending gauge",
+        f"meshlink_outbox_pending {float(metrics.get('outbox_pending', 0))}",
+        "# HELP meshlink_relay_pending Pending relay forwards in-process.",
+        "# TYPE meshlink_relay_pending gauge",
+        f"meshlink_relay_pending {float(metrics.get('relay_pending', 0))}",
+        "# HELP meshlink_relay_drops_total Total relay drops due to backpressure.",
+        "# TYPE meshlink_relay_drops_total counter",
+        f"meshlink_relay_drops_total {float(metrics.get('relay_drops_total', 0))}",
+        "# HELP meshlink_delivery_retry_total Delivery retries.",
+        "# TYPE meshlink_delivery_retry_total counter",
+        f"meshlink_delivery_retry_total {float(metrics.get('delivery_retry_total', 0))}",
+        "# HELP meshlink_delivery_fail_total Delivery failures.",
+        "# TYPE meshlink_delivery_fail_total counter",
+        f"meshlink_delivery_fail_total {float(metrics.get('delivery_fail_total', 0))}",
+        "# HELP meshlink_delivery_latency_sum_seconds Sum of delivery latencies.",
+        "# TYPE meshlink_delivery_latency_sum_seconds counter",
+        f"meshlink_delivery_latency_sum_seconds {float(metrics.get('delivery_latency_sum_seconds', 0.0))}",
+        "# HELP meshlink_delivery_latency_count Count of measured delivery latencies.",
+        "# TYPE meshlink_delivery_latency_count counter",
+        f"meshlink_delivery_latency_count {float(metrics.get('delivery_latency_count', 0.0))}",
+        "# HELP meshlink_file_resume_total Number of resumed file transfers.",
+        "# TYPE meshlink_file_resume_total counter",
+        f"meshlink_file_resume_total {float(metrics.get('file_resume_total', 0.0))}",
+        "# HELP meshlink_session_rotations_total Total cryptographic session rotations.",
+        "# TYPE meshlink_session_rotations_total counter",
+        f"meshlink_session_rotations_total {float(metrics.get('session_rotations_total', 0))}",
+        "# HELP meshlink_session_expired_total Total expired sessions.",
+        "# TYPE meshlink_session_expired_total counter",
+        f"meshlink_session_expired_total {float(metrics.get('session_expired_total', 0))}",
+        "# HELP meshlink_trusted_policy_incoming_text_drops_total Trusted-policy incoming text drops.",
+        "# TYPE meshlink_trusted_policy_incoming_text_drops_total counter",
+        f"meshlink_trusted_policy_incoming_text_drops_total {float(metrics.get('trusted_policy_incoming_text_drops_total', 0))}",
+        "# HELP meshlink_trusted_policy_incoming_file_drops_total Trusted-policy incoming file drops.",
+        "# TYPE meshlink_trusted_policy_incoming_file_drops_total counter",
+        f"meshlink_trusted_policy_incoming_file_drops_total {float(metrics.get('trusted_policy_incoming_file_drops_total', 0))}",
+        "# HELP meshlink_trusted_policy_incoming_call_drops_total Trusted-policy incoming call drops.",
+        "# TYPE meshlink_trusted_policy_incoming_call_drops_total counter",
+        f"meshlink_trusted_policy_incoming_call_drops_total {float(metrics.get('trusted_policy_incoming_call_drops_total', 0))}",
+        "# HELP meshlink_trusted_policy_outgoing_text_blocks_total Trusted-policy outgoing text blocks.",
+        "# TYPE meshlink_trusted_policy_outgoing_text_blocks_total counter",
+        f"meshlink_trusted_policy_outgoing_text_blocks_total {float(metrics.get('trusted_policy_outgoing_text_blocks_total', 0))}",
+        "# HELP meshlink_trusted_policy_outgoing_file_blocks_total Trusted-policy outgoing file blocks.",
+        "# TYPE meshlink_trusted_policy_outgoing_file_blocks_total counter",
+        f"meshlink_trusted_policy_outgoing_file_blocks_total {float(metrics.get('trusted_policy_outgoing_file_blocks_total', 0))}",
+        "# HELP meshlink_trusted_policy_outgoing_call_blocks_total Trusted-policy outgoing call blocks.",
+        "# TYPE meshlink_trusted_policy_outgoing_call_blocks_total counter",
+        f"meshlink_trusted_policy_outgoing_call_blocks_total {float(metrics.get('trusted_policy_outgoing_call_blocks_total', 0))}",
+        "# HELP meshlink_security_events_total Total security events emitted.",
+        "# TYPE meshlink_security_events_total counter",
+        f"meshlink_security_events_total {float(metrics.get('security_events_total', 0))}",
+    ]
+    return "\n".join(lines) + "\n"
+
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 app = Flask(
@@ -55,6 +115,7 @@ def init_app(mesh_node: MeshNode):
     node.on("message_status", lambda d: socketio.emit("message_status", d))
     node.on("media_stats", lambda d: socketio.emit("media_stats", d))
     node.on("security_event", lambda d: socketio.emit("security_event", d))
+    node.on("network_diagnostics", lambda d: socketio.emit("network_diagnostics", d))
 
     # WebRTC signaling relay: TCP peer → local browser
     node.on("webrtc_offer",  lambda d: socketio.emit("webrtc_offer", d))
@@ -115,6 +176,31 @@ def api_upload():
 @app.route("/downloads/<path:filename>")
 def download_file(filename):
     return send_from_directory(DOWNLOADS_DIR, filename)
+
+
+@app.route("/health")
+def health():
+    if node is None:
+        return jsonify({"status": "degraded", "reason": "node_not_initialized"}), 503
+    return jsonify(node.get_health_snapshot())
+
+
+@app.route("/ready")
+def ready():
+    if node is None:
+        return jsonify({"ready": False, "reason": "node_not_initialized"}), 503
+    ok = node.is_ready()
+    return jsonify({"ready": ok, "active_peers": len(node.get_peers())}), (200 if ok else 503)
+
+
+@app.route("/metrics")
+def metrics():
+    if node is None:
+        body = "meshlink_ready 0\n"
+        return app.response_class(body, mimetype="text/plain; version=0.0.4; charset=utf-8", status=503)
+    metrics_snapshot = node.get_metrics_snapshot()
+    body = _prometheus_text(metrics_snapshot)
+    return app.response_class(body, mimetype="text/plain; version=0.0.4; charset=utf-8")
 
 
 # ── Security / Seed-pairing / Blacklist API ──────────────
@@ -182,12 +268,18 @@ def api_security_snapshot():
     return jsonify(node.get_security_snapshot())
 
 
+@app.route("/api/network/diagnostics")
+def api_network_diagnostics():
+    return jsonify(node.get_network_diagnostics())
+
+
 # ── Socket.IO events ────────────────────────────────────
 
 @socketio.on("connect")
 def on_connect():
     emit("node_info", node.get_info())
     emit("peers_list", node.get_peers())
+    emit("network_diagnostics", node.get_network_diagnostics())
 
 
 @socketio.on("send_message")

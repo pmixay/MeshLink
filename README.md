@@ -14,8 +14,10 @@ MeshLink is a fully decentralized communication platform that works entirely ove
 - **File Transfer** — Chunked file streaming with SHA-256 integrity verification (up to 2 GB)
 - **Resumable File Transfer** — Resume/retry for interrupted 50–200 MB+ transfers
 - **Voice & Video Call Signaling** — UDP-based media engine with packet fragmentation
-- **Call Metrics in UI** — Real-time latency/loss/jitter/bitrate indicators
+- **Media Quality Upgrade** — directional (`uplink`/`downlink`) metrics, rolling `p50/p95` for latency/jitter, audio jitter-buffer + packet reordering
+- **Call Metrics in UI** — real-time latency/loss/jitter/bitrate plus directional diagnostics
 - **Security UX** — Message badges for encrypted/signed state and risk warnings
+- **Diagnostics UX** — dedicated *Security Events* tab with filters and *Network Diagnostics* panel
 - **Modern Web UI** — Beautiful dark-themed interface with real-time updates via WebSocket
 - **Cross-Platform** — Runs on Windows, macOS, and Linux (Python 3.9+)
 
@@ -201,6 +203,55 @@ Current test suite covers:
 
 - `GET /api/security/snapshot` — trusted-only flag, blacklist, banned peers, latest events
 - `GET /api/security/events?limit=200` — rolling security events stream for admin tools/UI
+
+### Network diagnostics endpoints/events
+
+- `GET /api/network/diagnostics` — aggregate diagnostics snapshot:
+  - delivery retries/failures and current `failed_reason`,
+  - outbox backlog / relay pending / relay drops,
+  - active file sends and free slots,
+  - media directional hints (uplink/downlink bitrate, p95 jitter, downlink loss).
+- `Socket.IO: network_diagnostics` — periodic push for UI diagnostics panel.
+
+### Media stats shape (selected keys)
+
+Backward-compatible legacy keys are preserved (`latency_ms`, `jitter_ms`, `loss_percent`, `bitrate_kbps`), and now additionally exposed:
+
+- `uplink_latency_ms`, `uplink_latency_p50_ms`, `uplink_latency_p95_ms`
+- `uplink_jitter_ms`, `uplink_jitter_p50_ms`, `uplink_jitter_p95_ms`
+- `downlink_latency_ms`, `downlink_latency_p50_ms`, `downlink_latency_p95_ms`
+- `downlink_jitter_ms`, `downlink_jitter_p50_ms`, `downlink_jitter_p95_ms`
+- `uplink_bitrate_kbps`, `downlink_bitrate_kbps`
+
+Audio receive path now includes a bounded jitter-buffer with packet reordering before callback delivery.
+
+### Multi-process integration coverage
+
+Added deterministic process-based integration scenario (`2–3` nodes):
+
+- text delivery path,
+- file delivery path,
+- recovery after kill/restart.
+
+Run explicitly:
+
+```bash
+python -m pytest -q tests/test_integration_multiprocess.py
+```
+
+or full suite:
+
+```bash
+python -m pytest -q
+```
+
+### CI (clean environment)
+
+GitHub Actions workflow: `.github/workflows/e2e-integration.yml`
+
+- installs dependencies on a fresh runner,
+- runs smoke subset,
+- runs multi-process integration job.
 
 ---
 

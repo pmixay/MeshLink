@@ -33,12 +33,23 @@
 
         .peers-section{flex:1;overflow-y:auto;padding:12px}
         .security-panel{border-top:1px solid var(--border);padding:12px;background:var(--bg1)}
+        .diag-tabs{display:flex;gap:6px;margin-bottom:10px}
+        .diag-tab{flex:1;border:1px solid var(--border);background:var(--bg2);color:var(--t2);border-radius:8px;padding:7px 8px;font-size:11px;cursor:pointer;transition:all var(--tr)}
+        .diag-tab.active{border-color:var(--accent2);color:var(--t1);background:var(--bg3)}
+        .diag-pane{display:none}
+        .diag-pane.active{display:block}
         .security-title{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:1.5px;color:var(--t3);margin-bottom:8px}
         .security-row{display:flex;justify-content:space-between;gap:8px;font-size:12px;color:var(--t2);margin-bottom:6px}
         .security-row strong{color:var(--t1);font-weight:600}
+        .security-filter{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:8px}
+        .security-filter input,.security-filter select{background:var(--bg2);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-size:11px;padding:6px 8px;outline:none}
+        .security-filter input:focus,.security-filter select:focus{border-color:var(--accent)}
         .security-log{max-height:140px;overflow-y:auto;background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:8px}
         .security-log-item{font-size:11px;color:var(--t2);line-height:1.45;margin-bottom:6px}
         .security-log-item:last-child{margin-bottom:0}
+        .diag-grid{display:grid;grid-template-columns:1fr;gap:6px}
+        .diag-item{display:flex;justify-content:space-between;gap:8px;font-size:12px;color:var(--t2);background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:6px 8px}
+        .diag-item strong{color:var(--t1);font-family:'JetBrains Mono',monospace;font-weight:600}
         .section-label{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:1.5px;color:var(--t3);padding:8px 8px 12px}
         .peer-item{display:flex;align-items:center;gap:12px;padding:12px;border-radius:var(--r);cursor:pointer;transition:all var(--tr)}
         .peer-item:hover{background:var(--bg3)}.peer-item.active{background:var(--bg4)}
@@ -171,11 +182,32 @@
             </div>
         </div>
         <div class="security-panel">
-            <div class="security-title">Security</div>
-            <div class="security-row"><span>Trusted-only</span><strong id="sec-trusted-only">off</strong></div>
-            <div class="security-row"><span>Blacklist</span><strong id="sec-blacklist">0</strong></div>
-            <div class="security-row"><span>Banned</span><strong id="sec-banned">0</strong></div>
-            <div class="security-log" id="sec-log"></div>
+            <div class="diag-tabs">
+                <button class="diag-tab active" id="tab-security" onclick="switchDiagTab('security')">Security Events</button>
+                <button class="diag-tab" id="tab-network" onclick="switchDiagTab('network')">Network Diagnostics</button>
+            </div>
+
+            <div class="diag-pane active" id="pane-security">
+                <div class="security-title">Security Events</div>
+                <div class="security-row"><span>Trusted-only</span><strong id="sec-trusted-only">off</strong></div>
+                <div class="security-row"><span>Blacklist</span><strong id="sec-blacklist">0</strong></div>
+                <div class="security-row"><span>Banned</span><strong id="sec-banned">0</strong></div>
+                <div class="security-filter">
+                    <input type="text" id="sec-filter-peer" placeholder="Filter by peer_id" oninput="renderSecurityPanel()">
+                    <select id="sec-filter-type" onchange="renderSecurityPanel()">
+                        <option value="">All events</option>
+                        <option value="blocked">Blocked</option>
+                        <option value="dropped">Dropped</option>
+                        <option value="session">Session</option>
+                    </select>
+                </div>
+                <div class="security-log" id="sec-log"></div>
+            </div>
+
+            <div class="diag-pane" id="pane-network">
+                <div class="security-title">Network Diagnostics</div>
+                <div class="diag-grid" id="diag-grid"></div>
+            </div>
         </div>
     </div>
 
@@ -292,6 +324,7 @@ const S = {
     muted:false, videoOff:false,
     mediaStats:{latency_ms:0,loss_percent:0,jitter_ms:0,bitrate_kbps:0},
     security:{trustedOnly:false,blacklist:[],banned:{},events:[]},
+    diagnostics:{delivery:{},queue:{},file_transfer:{},media:{},active_peers:0,ts:0},
 };
 let pc = null;           // RTCPeerConnection
 let localStream = null;  // getUserMedia stream
@@ -363,6 +396,11 @@ socket.on('security_event', e => {
     if(S.security.events.length>200)S.security.events=S.security.events.slice(-200);
     renderSecurityPanel();
 });
+socket.on('network_diagnostics', d => {
+    if(!d)return;
+    S.diagnostics=d;
+    renderDiagnosticsPanel();
+});
 
 fetch('/api/security/snapshot')
     .then(r=>r.json())
@@ -373,6 +411,11 @@ fetch('/api/security/snapshot')
         S.security.events=Array.isArray(s.events)?s.events:[];
         renderSecurityPanel();
     })
+    .catch(()=>{});
+
+fetch('/api/network/diagnostics')
+    .then(r=>r.json())
+    .then(d=>{S.diagnostics=d||S.diagnostics;renderDiagnosticsPanel();})
     .catch(()=>{});
 
 // File transfer
@@ -550,12 +593,59 @@ function renderSecurityPanel(){
     if(blEl)blEl.textContent=String((sec.blacklist||[]).length);
     if(banEl)banEl.textContent=String(Object.keys(sec.banned||{}).length);
     if(logEl){
-        const rows=(sec.events||[]).slice(-20).reverse();
+        const peerF=(document.getElementById('sec-filter-peer')?.value||'').trim().toLowerCase();
+        const typeF=(document.getElementById('sec-filter-type')?.value||'').trim().toLowerCase();
+        const rows=(sec.events||[])
+            .filter(ev=>{
+                const evName=String(ev.event||'').toLowerCase();
+                const evPeer=String(ev.peer_id||'').toLowerCase();
+                if(peerF && !evPeer.includes(peerF)) return false;
+                if(typeF && !evName.includes(typeF)) return false;
+                return true;
+            })
+            .slice(-20)
+            .reverse();
         logEl.innerHTML=rows.length?rows.map(ev=>`<div class="security-log-item">`+
             `<strong>${escHtml(ev.event||'event')}</strong><br>`+
             `<span>${escHtml((ev.peer_id||'system')+' · '+fmtTs(ev.ts||Date.now()/1000))}</span>`+
             `</div>`).join(''):'<div class="security-log-item">No security events yet</div>';
     }
+}
+
+function switchDiagTab(tab){
+    const secTab=document.getElementById('tab-security');
+    const netTab=document.getElementById('tab-network');
+    const secPane=document.getElementById('pane-security');
+    const netPane=document.getElementById('pane-network');
+    const onSecurity=tab==='security';
+    secTab.classList.toggle('active',onSecurity);
+    netTab.classList.toggle('active',!onSecurity);
+    secPane.classList.toggle('active',onSecurity);
+    netPane.classList.toggle('active',!onSecurity);
+}
+
+function renderDiagnosticsPanel(){
+    const d=S.diagnostics||{};
+    const q=d.queue||{};
+    const delivery=d.delivery||{};
+    const ft=d.file_transfer||{};
+    const m=d.media||{};
+    const diag=document.getElementById('diag-grid');
+    if(!diag)return;
+    const row=(k,v)=>`<div class="diag-item"><span>${escHtml(k)}</span><strong>${escHtml(String(v))}</strong></div>`;
+    const items=[
+        row('Delivery retries', Number(delivery.retry_total||0).toFixed(0)),
+        row('Delivery failures', Number(delivery.fail_total||0).toFixed(0)),
+        row('Failed reason', delivery.failed_reason||'none'),
+        row('Outbox backlog', Number(q.outbox_backlog||0).toFixed(0)),
+        row('Relay pending', Number(q.relay_pending||0).toFixed(0)),
+        row('Relay drops', Number(q.relay_drops_total||0).toFixed(0)),
+        row('Active sends', `${Number(ft.active_sends||0).toFixed(0)}/${Number(ft.max_active_sends||0).toFixed(0)}`),
+        row('Send slots free', Number(ft.available_send_slots||0).toFixed(0)),
+        row('Downlink loss', `${Number(m.downlink_loss_percent||0).toFixed(2)}%`),
+        row('Downlink bitrate', `${Number(m.downlink_bitrate_kbps||0).toFixed(2)} kbps`),
+    ];
+    diag.innerHTML=items.join('');
 }
 
 function scrollBot(){const c=document.getElementById('messages');requestAnimationFrame(()=>c.scrollTop=c.scrollHeight);}
