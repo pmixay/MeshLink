@@ -213,7 +213,6 @@ class MessageServer:
         self._server_sock: Optional[socket.socket] = None
         self._connections: Dict[str, socket.socket] = {}
         self._lock         = threading.Lock()
-        self._lock         = threading.Lock()
         self._delivery_lock = threading.Lock()
         self._delivery_status: Dict[str, str] = {}
         self._delivery_events: Dict[str, threading.Event] = {}

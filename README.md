@@ -10,8 +10,12 @@ MeshLink is a fully decentralized communication platform that works entirely ove
 
 - **Zero-config P2P Discovery** — Automatic peer detection via UDP broadcast + multicast
 - **Encrypted Messaging** — End-to-end encryption using X25519 key exchange + AES-256-GCM
+- **Delivery Statuses** — `sent` / `delivered` / `failed` with retry/backoff in transport
 - **File Transfer** — Chunked file streaming with SHA-256 integrity verification (up to 2 GB)
+- **Resumable File Transfer** — Resume/retry for interrupted 50–200 MB+ transfers
 - **Voice & Video Call Signaling** — UDP-based media engine with packet fragmentation
+- **Call Metrics in UI** — Real-time latency/loss/jitter/bitrate indicators
+- **Security UX** — Message badges for encrypted/signed state and risk warnings
 - **Modern Web UI** — Beautiful dark-themed interface with real-time updates via WebSocket
 - **Cross-Platform** — Runs on Windows, macOS, and Linux (Python 3.9+)
 
@@ -69,7 +73,10 @@ export MESHLINK_TCP_PORT=5151
 export MESHLINK_MEDIA_PORT=5152
 export MESHLINK_DISCOVERY_PORT=5150
 export MESHLINK_DOWNLOADS="~/Downloads/MeshLink"
+export MESHLINK_TRUSTED_ONLY=1
 ```
+
+`MESHLINK_TRUSTED_ONLY=1` enables strict mode: personal text chats are only accepted/sent for seed-paired (trusted) peers.
 
 ---
 

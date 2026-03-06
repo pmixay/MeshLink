@@ -92,6 +92,9 @@ class FileTransferManager:
         self.on_file_received: Optional[Callable] = None
         self.max_retries = 4
         self.retry_backoff_base = 0.5
+        self.max_active_sends = 4
+        self.partial_ttl_seconds = 24 * 3600
+        self._send_semaphore = threading.Semaphore(self.max_active_sends)
 
     def start(self):
         self._running = True
@@ -101,6 +104,7 @@ class FileTransferManager:
         self._server_sock.bind(("0.0.0.0", FILE_PORT))
         self._server_sock.listen(10)
         threading.Thread(target=self._accept_loop, daemon=True, name="file-server").start()
+        threading.Thread(target=self._partial_cleanup_loop, daemon=True, name="file-partial-gc").start()
         logger.info(f"File transfer server on port {FILE_PORT}")
 
     def stop(self):
@@ -112,6 +116,34 @@ class FileTransferManager:
     def get_transfers(self) -> list:
         with self._lock:
             return [t.to_dict() for t in self.transfers.values()]
+
+    def _partials_dir(self) -> str:
+        d = os.path.join(DOWNLOADS_DIR, ".partials")
+        os.makedirs(d, exist_ok=True)
+        return d
+
+    def _partial_cleanup_loop(self):
+        while self._running:
+            try:
+                now = time.time()
+                part_dir = self._partials_dir()
+                for name in os.listdir(part_dir):
+                    if not name.endswith(".part"):
+                        continue
+                    path = os.path.join(part_dir, name)
+                    try:
+                        st = os.stat(path)
+                    except Exception:
+                        continue
+                    if now - st.st_mtime > self.partial_ttl_seconds:
+                        try:
+                            os.remove(path)
+                            logger.info(f"Removed stale partial: {name}")
+                        except Exception:
+                            pass
+            except Exception as e:
+                logger.debug(f"Partial cleanup error: {e}")
+            time.sleep(300)
 
     # ── Receiver ────────────────────────────────────────────
 
@@ -154,8 +186,7 @@ class FileTransferManager:
                 direction="recv", peer_id=sender_id, peer_name=sender_name,
             )
 
-            part_dir = os.path.join(DOWNLOADS_DIR, ".partials")
-            os.makedirs(part_dir, exist_ok=True)
+            part_dir = self._partials_dir()
             part_path = os.path.join(part_dir, f"{file_id}.part")
 
             existing = 0
@@ -306,119 +337,123 @@ class FileTransferManager:
 
     def _send_worker(self, filepath: str, peer_ip: str,
                      peer_file_port: int, transfer: TransferInfo):
+        self._send_semaphore.acquire()
         last_error = None
-        for attempt in range(1, self.max_retries + 1):
-            sock = None
-            try:
-                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-                sock.settimeout(12)
-                sock.connect((peer_ip, peer_file_port))
+        try:
+            for attempt in range(1, self.max_retries + 1):
+                sock = None
+                try:
+                    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                    sock.settimeout(12)
+                    sock.connect((peer_ip, peer_file_port))
 
-                # Send header with resume capability
-                header = {
-                    "file_id": transfer.file_id,
-                    "filename": transfer.filename,
-                    "filesize": transfer.filesize,
-                    "sender_id": NODE_ID,
-                    "sender_name": NODE_NAME,
-                    "resume": True,
-                }
-                sock.sendall(json.dumps(header).encode() + b"\n")
+                    # Send header with resume capability
+                    header = {
+                        "file_id": transfer.file_id,
+                        "filename": transfer.filename,
+                        "filesize": transfer.filesize,
+                        "sender_id": NODE_ID,
+                        "sender_name": NODE_NAME,
+                        "resume": True,
+                    }
+                    sock.sendall(json.dumps(header).encode() + b"\n")
 
-                # Wait for accept and offset
-                resp = json.loads(_recv_line(sock).decode())
-                if resp.get("status") != "accepted":
-                    transfer.status = "rejected"
+                    # Wait for accept and offset
+                    resp = json.loads(_recv_line(sock).decode())
+                    if resp.get("status") != "accepted":
+                        transfer.status = "rejected"
+                        if self.on_progress:
+                            self.on_progress(transfer)
+                        return
+
+                    offset = int(resp.get("offset", 0) or 0)
+                    if offset < 0 or offset > transfer.filesize:
+                        offset = 0
+
+                    transfer.progress = offset
+                    transfer.status = "active"
+                    sha = hashlib.sha256()
+
+                    # Hash already-sent portion to keep final checksum correct
+                    if offset > 0:
+                        with open(filepath, "rb") as rf:
+                            remaining_hash = offset
+                            while remaining_hash > 0:
+                                piece = rf.read(min(CHUNK_SIZE, remaining_hash))
+                                if not piece:
+                                    break
+                                sha.update(piece)
+                                remaining_hash -= len(piece)
+
+                    last_emit = time.time()
+                    sock.settimeout(120)
+
+                    with open(filepath, "rb") as f:
+                        f.seek(offset)
+                        while transfer.progress < transfer.filesize:
+                            chunk = f.read(CHUNK_SIZE)
+                            if not chunk:
+                                break
+                            sock.sendall(chunk)
+                            sha.update(chunk)
+                            transfer.progress += len(chunk)
+
+                            elapsed = time.time() - transfer.start_time
+                            if elapsed > 0:
+                                transfer.speed = transfer.progress / elapsed
+
+                            now = time.time()
+                            if now - last_emit >= 0.1:
+                                last_emit = now
+                                if self.on_progress:
+                                    self.on_progress(transfer)
+
+                    if transfer.progress < transfer.filesize:
+                        raise ConnectionError("Transfer interrupted before EOF")
+
+                    # Send trailer
+                    transfer.sha256 = sha.hexdigest()
+                    sock.sendall(json.dumps({"sha256": transfer.sha256}).encode() + b"\n")
+
+                    transfer.status = "complete"
+                    logger.info(f"File sent: {transfer.filename}")
+                    persist_chat_entry({
+                        "peer_id": transfer.peer_id,
+                        "msg_id": f"file-{transfer.file_id}",
+                        "sender_id": NODE_ID,
+                        "sender_name": NODE_NAME,
+                        "text": transfer.filename,
+                        "timestamp": time.time(),
+                        "is_me": True,
+                        "msg_type": "file",
+                        "file_name": transfer.filename,
+                        "file_size": transfer.filesize,
+                        "status": "delivered",
+                    })
                     if self.on_progress:
                         self.on_progress(transfer)
+                    if self.on_complete:
+                        self.on_complete(transfer)
                     return
 
-                offset = int(resp.get("offset", 0) or 0)
-                if offset < 0 or offset > transfer.filesize:
-                    offset = 0
+                except Exception as e:
+                    last_error = e
+                    transfer.status = "retrying" if attempt < self.max_retries else "failed"
+                    logger.warning(
+                        f"Send attempt {attempt}/{self.max_retries} failed for {transfer.filename}: {e}"
+                    )
+                    if self.on_progress:
+                        self.on_progress(transfer)
+                    if attempt < self.max_retries:
+                        time.sleep(self.retry_backoff_base * (2 ** (attempt - 1)))
+                finally:
+                    if sock:
+                        try:
+                            sock.close()
+                        except Exception:
+                            pass
 
-                transfer.progress = offset
-                transfer.status = "active"
-                sha = hashlib.sha256()
-
-                # Hash already-sent portion to keep final checksum correct
-                if offset > 0:
-                    with open(filepath, "rb") as rf:
-                        remaining_hash = offset
-                        while remaining_hash > 0:
-                            piece = rf.read(min(CHUNK_SIZE, remaining_hash))
-                            if not piece:
-                                break
-                            sha.update(piece)
-                            remaining_hash -= len(piece)
-
-                last_emit = time.time()
-                sock.settimeout(120)
-
-                with open(filepath, "rb") as f:
-                    f.seek(offset)
-                    while transfer.progress < transfer.filesize:
-                        chunk = f.read(CHUNK_SIZE)
-                        if not chunk:
-                            break
-                        sock.sendall(chunk)
-                        sha.update(chunk)
-                        transfer.progress += len(chunk)
-
-                        elapsed = time.time() - transfer.start_time
-                        if elapsed > 0:
-                            transfer.speed = transfer.progress / elapsed
-
-                        now = time.time()
-                        if now - last_emit >= 0.1:
-                            last_emit = now
-                            if self.on_progress:
-                                self.on_progress(transfer)
-
-                if transfer.progress < transfer.filesize:
-                    raise ConnectionError("Transfer interrupted before EOF")
-
-                # Send trailer
-                transfer.sha256 = sha.hexdigest()
-                sock.sendall(json.dumps({"sha256": transfer.sha256}).encode() + b"\n")
-
-                transfer.status = "complete"
-                logger.info(f"File sent: {transfer.filename}")
-                persist_chat_entry({
-                    "peer_id": transfer.peer_id,
-                    "msg_id": f"file-{transfer.file_id}",
-                    "sender_id": NODE_ID,
-                    "sender_name": NODE_NAME,
-                    "text": transfer.filename,
-                    "timestamp": time.time(),
-                    "is_me": True,
-                    "msg_type": "file",
-                    "file_name": transfer.filename,
-                    "file_size": transfer.filesize,
-                    "status": "delivered",
-                })
-                if self.on_progress:
-                    self.on_progress(transfer)
-                if self.on_complete:
-                    self.on_complete(transfer)
-                return
-
-            except Exception as e:
-                last_error = e
-                transfer.status = "retrying" if attempt < self.max_retries else "failed"
-                logger.warning(
-                    f"Send attempt {attempt}/{self.max_retries} failed for {transfer.filename}: {e}"
-                )
-                if self.on_progress:
-                    self.on_progress(transfer)
-                if attempt < self.max_retries:
-                    time.sleep(self.retry_backoff_base * (2 ** (attempt - 1)))
-            finally:
-                if sock:
-                    try:
-                        sock.close()
-                    except Exception:
-                        pass
-
-        logger.error(f"Send failed: {transfer.filename}: {last_error}")
+            logger.error(f"Send failed: {transfer.filename}: {last_error}")
+        finally:
+            self._send_semaphore.release()

@@ -63,6 +63,15 @@
         .msg-time{font-size:10px;color:var(--t3);margin-top:4px;padding:0 4px}
         .msg-me .msg-time{color:rgba(255,255,255,.5);text-align:right}
         .msg-sender{font-size:11px;font-weight:600;color:var(--accent2);margin-bottom:3px}
+        .msg-meta{display:flex;align-items:center;gap:6px;margin-top:6px;flex-wrap:wrap}
+        .msg-badge{font-size:10px;padding:2px 6px;border-radius:999px;border:1px solid transparent}
+        .badge-enc{background:var(--greend);border-color:#3dd68c50;color:#9ef0c8}
+        .badge-signed{background:#6c63ff30;border-color:#6c63ff66;color:#c6c3ff}
+        .badge-risk{background:var(--redd);border-color:#ff6b6b66;color:#ffc5c5}
+        .msg-status{font-size:10px;opacity:.9}
+        .msg-status.failed{color:#ffd0d0}
+        .msg-status.sent{color:#e9e9ff}
+        .msg-status.delivered{color:#d2ffe8}
         .msg-file{background:var(--bg2);border:1px solid var(--border);border-radius:var(--r);padding:10px 14px;font-size:13px;max-width:65%;align-self:flex-start}
         .msg-file.msg-file-me{align-self:flex-end;border-color:var(--accent);background:var(--accent)10}
         .msg-file a{color:var(--accent2);text-decoration:none}
@@ -111,6 +120,10 @@
         .call-status{font-size:14px;color:var(--t2)}
         .call-timer{font-family:'JetBrains Mono',monospace;font-size:18px;color:var(--t2)}
         .call-controls{display:flex;gap:12px;margin-top:16px}
+        .call-metrics{display:grid;grid-template-columns:repeat(2,minmax(120px,1fr));gap:8px;width:min(440px,92vw)}
+        .metric-card{background:var(--bg1);border:1px solid var(--border);border-radius:10px;padding:8px 10px}
+        .metric-label{font-size:10px;color:var(--t3);text-transform:uppercase;letter-spacing:.8px}
+        .metric-value{font-size:13px;color:var(--t1);font-family:'JetBrains Mono',monospace;margin-top:4px}
         .btn-call{width:56px;height:56px;border-radius:50%;display:flex;align-items:center;justify-content:center;border:none;cursor:pointer;transition:all var(--tr);color:#fff}
         .btn-call:hover{transform:scale(1.1)}
         .btn-call-end{background:var(--red)}.btn-call-accept{background:var(--green)}
@@ -229,6 +242,12 @@
             <div class="call-name" id="call-name-active">Unknown</div>
         </div>
         <div class="call-timer" id="call-timer">00:00</div>
+        <div class="call-metrics" id="call-metrics">
+            <div class="metric-card"><div class="metric-label">Latency</div><div class="metric-value" id="m-latency">0 ms</div></div>
+            <div class="metric-card"><div class="metric-label">Loss</div><div class="metric-value" id="m-loss">0%</div></div>
+            <div class="metric-card"><div class="metric-label">Jitter</div><div class="metric-value" id="m-jitter">0 ms</div></div>
+            <div class="metric-card"><div class="metric-label">Bitrate</div><div class="metric-value" id="m-bitrate">0 kbps</div></div>
+        </div>
         <div class="call-controls">
             <button class="btn-call btn-call-mute" id="btn-mute" onclick="toggleMute()" title="Mute">
                 <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
@@ -257,6 +276,7 @@ const S = {
     callPeer:null, callType:null, callDir:null,
     callTimer:null, callSec:0, callActive:false,
     muted:false, videoOff:false,
+    mediaStats:{latency_ms:0,loss_percent:0,jitter_ms:0,bitrate_kbps:0},
 };
 let pc = null;           // RTCPeerConnection
 let localStream = null;  // getUserMedia stream
@@ -294,9 +314,31 @@ socket.on('message', m => {
     if(S.activePeer===pid){appendMsg(m);scrollBot();}
     else{S.unread[pid]=(S.unread[pid]||0)+1;renderPeers();}
 });
-socket.on('message_sent', () => {});
+socket.on('message_sent', m => {
+    if(!m || !m.msg_id || !S.activePeer)return;
+    if(!S.messages[S.activePeer])S.messages[S.activePeer]=[];
+    const arr=S.messages[S.activePeer];
+    const idx=arr.findIndex(x=>x.msg_id===m.msg_id);
+    if(idx>=0){arr[idx]={...arr[idx],...m};}
+    else{arr.push(m);}
+    if(S.activePeer===m.sender_id || m.is_me) renderMsgs(S.activePeer);
+});
+socket.on('message_status', d => {
+    const pid=d.peer_id;
+    if(!pid || !d.msg_id)return;
+    const arr=S.messages[pid]||[];
+    const msg=arr.find(x=>x.msg_id===d.msg_id);
+    if(msg){
+        msg.status=d.status;
+        if(S.activePeer===pid) renderMsgs(pid);
+    }
+});
 socket.on('typing', d => { if(d.peer_id===S.activePeer) showTyping(d.peer_name); });
 socket.on('chat_history', d => { S.messages[d.peer_id]=d.messages; if(S.activePeer===d.peer_id)renderMsgs(d.peer_id); });
+socket.on('media_stats', d => {
+    S.mediaStats=d||S.mediaStats;
+    renderCallMetrics();
+});
 
 // File transfer
 socket.on('file_progress', updateXfer);
@@ -435,10 +477,32 @@ function appendMsg(m,anim=true){
         let h='';
         if(!me)h+=`<div class="msg-sender">${escHtml(m.sender_name)}</div>`;
         h+=`<div>${escHtml(m.text)}</div>`;
-        h+=`<div class="msg-time">${fmtTime(m.timestamp)}</div>`;
+
+        const badges=[];
+        if(m.encrypted)badges.push('<span class="msg-badge badge-enc">🔒 encrypted</span>');
+        if(m.signed)badges.push('<span class="msg-badge badge-signed">✍ signed</span>');
+        if(m.text==='[decryption failed]' || (m.signed===false && !me)){
+            badges.push('<span class="msg-badge badge-risk">⚠ risk</span>');
+        }
+
+        const statusTxt = me && m.status ? `<span class="msg-status ${escHtml(m.status)}">${escHtml(m.status)}</span>` : '';
+        h+=`<div class="msg-meta">${badges.join('')}<span class="msg-time">${fmtTime(m.timestamp)}</span>${statusTxt}</div>`;
         div.innerHTML=h;
     }
     c.appendChild(div);
+}
+
+function renderCallMetrics(){
+    const s=S.mediaStats||{};
+    const latency=Math.round(Number(s.latency_ms||0));
+    const loss=Number(s.loss_percent||0).toFixed(2);
+    const jitter=Number(s.jitter_ms||0).toFixed(2);
+    const bitrate=Number(s.bitrate_kbps||0).toFixed(2);
+    const set=(id,v)=>{const el=document.getElementById(id);if(el)el.textContent=v;};
+    set('m-latency', `${latency} ms`);
+    set('m-loss', `${loss}%`);
+    set('m-jitter', `${jitter} ms`);
+    set('m-bitrate', `${bitrate} kbps`);
 }
 
 function scrollBot(){const c=document.getElementById('messages');requestAnimationFrame(()=>c.scrollTop=c.scrollHeight);}
@@ -651,6 +715,7 @@ function showActiveCall(isVideo){
             document.getElementById('call-avatar-active').style.background=pColor(p.peer_id);
         }
     }
+    renderCallMetrics();
 }
 
 function hideCall(){

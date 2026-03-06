@@ -53,6 +53,12 @@ class MediaEngine:
         self._peer_addr: Optional[tuple] = None  # (ip, port)
         self._seq_out = 0
         self._seq_in = 0
+        self._last_recv_ts_ms = None
+        self._last_recv_wall = None
+        self._bitrate_last_bytes = 0
+        self._bitrate_last_time = time.time()
+        self._last_seq = 0
+        self._stats_lock = threading.Lock()
 
         # Callbacks for received media
         self.on_audio_frame: Optional[Callable[[bytes, float], None]] = None
@@ -66,6 +72,9 @@ class MediaEngine:
             "bytes_sent": 0,
             "bytes_recv": 0,
             "latency_ms": 0,
+            "loss_percent": 0.0,
+            "jitter_ms": 0.0,
+            "bitrate_kbps": 0.0,
         }
 
     # ── Socket management ───────────────────────────────────
@@ -98,7 +107,11 @@ class MediaEngine:
         self._call_state = CallState.ACTIVE
         self._seq_out = 0
         self._seq_in = 0
-        self.stats = {k: 0 for k in self.stats}
+        with self._stats_lock:
+            self.stats = {k: 0 for k in self.stats}
+        self._last_recv_ts_ms = None
+        self._last_recv_wall = None
+        self._last_seq = 0
         logger.info(f"Call started → {peer_ip}:{peer_media_port}")
         if self.on_call_state_change:
             self.on_call_state_change(CallState.ACTIVE)
@@ -135,8 +148,9 @@ class MediaEngine:
         packet = self._make_packet(MEDIA_AUDIO, pcm_data)
         try:
             self._sock.sendto(packet, self._peer_addr)
-            self.stats["packets_sent"] += 1
-            self.stats["bytes_sent"] += len(packet)
+            with self._stats_lock:
+                self.stats["packets_sent"] += 1
+                self.stats["bytes_sent"] += len(packet)
         except Exception as e:
             logger.debug(f"Audio send error: {e}")
 
@@ -159,8 +173,9 @@ class MediaEngine:
             packet = self._make_packet(MEDIA_VIDEO, frag_header + chunk)
             try:
                 self._sock.sendto(packet, self._peer_addr)
-                self.stats["packets_sent"] += 1
-                self.stats["bytes_sent"] += len(packet)
+                with self._stats_lock:
+                    self.stats["packets_sent"] += 1
+                    self.stats["bytes_sent"] += len(packet)
             except Exception as e:
                 logger.debug(f"Video send error: {e}")
             offset += MAX_UDP_PAYLOAD
@@ -192,11 +207,36 @@ class MediaEngine:
             ptype, ts, seq, plen = struct.unpack(HEADER_FORMAT, data[:HEADER_SIZE])
             payload = data[HEADER_SIZE:HEADER_SIZE + plen]
 
-            self.stats["packets_recv"] += 1
-            self.stats["bytes_recv"] += len(data)
-
             now_ms = int(time.time() * 1000)
-            self.stats["latency_ms"] = max(0, now_ms - ts)
+            now_wall = time.time()
+            with self._stats_lock:
+                self.stats["packets_recv"] += 1
+                self.stats["bytes_recv"] += len(data)
+                self.stats["latency_ms"] = max(0, now_ms - ts)
+
+                # Packet loss estimate from seq gaps
+                if self._last_seq > 0 and seq > self._last_seq + 1:
+                    lost = seq - self._last_seq - 1
+                    recv = max(1, self.stats["packets_recv"])
+                    self.stats["loss_percent"] = round((lost / (lost + recv)) * 100.0, 2)
+                self._last_seq = max(self._last_seq, seq)
+
+                # RTP-style jitter approximation
+                if self._last_recv_ts_ms is not None and self._last_recv_wall is not None:
+                    sent_delta = max(0.0, (ts - self._last_recv_ts_ms) / 1000.0)
+                    recv_delta = max(0.0, now_wall - self._last_recv_wall)
+                    d_ms = abs((recv_delta - sent_delta) * 1000.0)
+                    prev_j = float(self.stats.get("jitter_ms", 0.0) or 0.0)
+                    self.stats["jitter_ms"] = round(prev_j + (d_ms - prev_j) / 16.0, 2)
+                self._last_recv_ts_ms = ts
+                self._last_recv_wall = now_wall
+
+                # Bitrate estimate over last interval
+                dt = max(0.001, now_wall - self._bitrate_last_time)
+                dbytes = max(0, self.stats["bytes_recv"] - self._bitrate_last_bytes)
+                self.stats["bitrate_kbps"] = round((dbytes * 8.0 / 1000.0) / dt, 2)
+                self._bitrate_last_bytes = self.stats["bytes_recv"]
+                self._bitrate_last_time = now_wall
 
             # Auto-accept incoming media as a call
             if self._call_state != CallState.ACTIVE and ptype in (MEDIA_AUDIO, MEDIA_VIDEO):
@@ -242,4 +282,5 @@ class MediaEngine:
                         self.on_call_state_change(CallState.ENDED)
 
     def get_stats(self) -> dict:
-        return dict(self.stats)
+        with self._stats_lock:
+            return dict(self.stats)

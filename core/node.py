@@ -23,6 +23,7 @@ from .config import (
     TCP_PORT, MEDIA_PORT, FILE_PORT, DOWNLOADS_DIR,
     MESH_TTL_DEFAULT, MESH_LRU_MAX_SIZE,
     RATE_LIMIT_MAX_MSGS, RATE_LIMIT_WINDOW, RATE_LIMIT_BAN_SECS,
+    TRUSTED_ONLY_PRIVATE_CHATS,
 )
 from .crypto import CryptoManager
 from .discovery import DiscoveryService, PeerInfo
@@ -30,6 +31,7 @@ from .messaging import (
     MessageServer, Message, MsgType,
     make_text_message, make_call_invite, make_key_exchange,
     make_seed_pair_message,
+    persist_chat_entry,
 )
 from .file_transfer import FileTransferManager
 from .media import MediaEngine, CallState
@@ -160,6 +162,7 @@ class ChatMessage:
     file_size:   int   = 0
     signed:      bool  = False    # True if signature was verified
     encrypted:   bool  = False    # True if message was E2E encrypted
+    status:      str   = ""       # sent / delivered / failed (mostly for outgoing)
 
     def to_dict(self):
         d = {
@@ -172,6 +175,7 @@ class ChatMessage:
             "msg_type":    self.msg_type,
             "signed":      self.signed,
             "encrypted":   self.encrypted,
+            "status":      self.status,
         }
         if self.msg_type == "file":
             d["file_url"]  = self.file_url
@@ -220,6 +224,7 @@ class MeshNode:
         self.msg_server.on(MsgType.TYPING,       self._on_typing)
         self.msg_server.on(MsgType.MESH_RELAY,   self._on_mesh_relay)
         self.msg_server.on(MsgType.SEED_PAIR,    self._on_seed_pair)
+        self.msg_server.on_delivery_status = self._on_delivery_status
 
         # WebRTC signaling relay
         self.msg_server.on(MsgType.WEBRTC_OFFER,  self._on_webrtc_signal)
@@ -229,6 +234,37 @@ class MeshNode:
         # File transfer events
         self.file_mgr.on_progress = self._on_file_progress
         self.file_mgr.on_complete = self._on_file_complete
+
+    def _on_delivery_status(self, data: dict):
+        peer_id = data.get("peer_id", "")
+        msg_id = data.get("msg_id", "")
+        status = data.get("status", "")
+        if not peer_id or not msg_id or not status:
+            return
+
+        updated = False
+        with self._chat_lock:
+            bucket = self.chats.get(peer_id, [])
+            for item in reversed(bucket):
+                if item.msg_id == msg_id and item.is_me:
+                    item.status = status
+                    updated = True
+                    break
+
+        if updated:
+            persist_chat_entry({
+                "kind": "status_update",
+                "peer_id": peer_id,
+                "msg_id": msg_id,
+                "status": status,
+                "timestamp": time.time(),
+            })
+            self._emit("message_status", {
+                "peer_id": peer_id,
+                "msg_id": msg_id,
+                "status": status,
+                "timestamp": data.get("timestamp", time.time()),
+            })
 
     # ── Event system ─────────────────────────────────────────────────────────
 
@@ -250,6 +286,7 @@ class MeshNode:
         self.msg_server.start()
         self.file_mgr.start()
         self.media.start()
+        threading.Thread(target=self._media_stats_loop, daemon=True, name="media-stats-loop").start()
         logger.info("All subsystems started.")
 
     def stop(self):
@@ -278,6 +315,11 @@ class MeshNode:
             return False
         if msg_id:
             self._seen_msgs.add(msg_id)
+
+        if TRUSTED_ONLY_PRIVATE_CHATS and msg.msg_type == MsgType.TEXT:
+            if not self.crypto.is_trusted(msg.sender_id):
+                logger.info(f"Trusted-only mode: dropped untrusted text from {msg.sender_id}")
+                return False
 
         return True
 
@@ -342,6 +384,7 @@ class MeshNode:
             is_me=       False,
             signed=      signed,
             encrypted=   was_enc,
+            status=      "delivered",
         )
         with self._chat_lock:
             self.chats.setdefault(msg.sender_id, []).append(chat_msg)
@@ -405,8 +448,24 @@ class MeshNode:
         if not self._security_check(msg):
             return
 
+        if msg.signature:
+            relay_ok = self.crypto.verify_from(
+                msg.sender_id,
+                msg.canonical_bytes(),
+                msg.signature,
+            )
+            if not relay_ok:
+                logger.warning(
+                    f"Dropped mesh relay with invalid signature: {msg.msg_id} from {msg.sender_id}"
+                )
+                return
+
         inner_type = msg.payload.get("inner_type")
         inner_payload = msg.payload.get("inner_payload", {})
+
+        if inner_payload.get("private") and not inner_payload.get("encrypted"):
+            logger.warning(f"Dropped insecure private relay payload: {msg.msg_id}")
+            return
 
         # Deliver locally
         if inner_type == MsgType.TEXT:
@@ -453,6 +512,7 @@ class MeshNode:
                 ttl=         msg.ttl - 1,
                 relay_path=  msg.relay_path + [NODE_ID],
             )
+            relay_msg.signature = self.crypto.sign(relay_msg.canonical_bytes())
             self.msg_server.send_to_peer(peer.ip, peer.tcp_port, relay_msg, pid)
 
     def _send_mesh_text(self, text: str, origin_msg_id: str = ""):
@@ -479,7 +539,17 @@ class MeshNode:
                 ttl=         MESH_TTL_DEFAULT,
                 relay_path=  [NODE_ID],
             )
+            relay_msg.signature = self.crypto.sign(relay_msg.canonical_bytes())
             self.msg_server.send_to_peer(peer.ip, peer.tcp_port, relay_msg, pid)
+
+    def _media_stats_loop(self):
+        while True:
+            try:
+                stats = self.media.get_stats()
+                self._emit("media_stats", stats)
+                time.sleep(1.0)
+            except Exception:
+                time.sleep(1.0)
 
     # ── WebRTC signaling relay ────────────────────────────────────────────────
 
@@ -570,6 +640,7 @@ class MeshNode:
             "downloads_dir": DOWNLOADS_DIR,
             "encryption":  self.crypto.keypair.private_key is not None,
             "signing_key": self.crypto.signing_key_b64,
+            "trusted_only_private_chats": TRUSTED_ONLY_PRIVATE_CHATS,
         }
 
     def get_peers(self) -> list:
@@ -586,6 +657,10 @@ class MeshNode:
         """
         peer = self.discovery.get_peer(peer_id)
         if not peer:
+            return None
+
+        if TRUSTED_ONLY_PRIVATE_CHATS and not self.crypto.is_trusted(peer_id):
+            logger.info(f"Trusted-only mode: blocked outgoing text to untrusted peer {peer_id}")
             return None
 
         # Build message with E2E encryption
@@ -609,6 +684,9 @@ class MeshNode:
 
         success = self.msg_server.send_to_peer(peer.ip, peer.tcp_port, msg, peer_id)
         if success:
+            status = self.msg_server.get_delivery_status(msg.msg_id)
+            if status not in ("sent", "delivered", "failed"):
+                status = "sent"
             chat_msg = ChatMessage(
                 msg_id=      msg.msg_id or f"{NODE_ID}-{time.time_ns()}",
                 sender_id=   NODE_ID,
@@ -618,9 +696,23 @@ class MeshNode:
                 is_me=       True,
                 signed=      True,
                 encrypted=   encrypted,
+                status=      status,
             )
             with self._chat_lock:
                 self.chats.setdefault(peer_id, []).append(chat_msg)
+            persist_chat_entry({
+                "peer_id": peer_id,
+                "msg_id": chat_msg.msg_id,
+                "sender_id": NODE_ID,
+                "sender_name": NODE_NAME,
+                "text": display_text,
+                "timestamp": chat_msg.timestamp,
+                "is_me": True,
+                "msg_type": "text",
+                "signed": True,
+                "encrypted": encrypted,
+                "status": status,
+            })
             return chat_msg.to_dict()
         return None
 

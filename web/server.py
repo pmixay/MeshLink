@@ -52,6 +52,8 @@ def init_app(mesh_node: MeshNode):
     node.on("call_ended", lambda d: socketio.emit("call_ended", d))
     node.on("file_progress", lambda d: socketio.emit("file_progress", d))
     node.on("file_complete", lambda d: socketio.emit("file_complete", d))
+    node.on("message_status", lambda d: socketio.emit("message_status", d))
+    node.on("media_stats", lambda d: socketio.emit("media_stats", d))
 
     # WebRTC signaling relay: TCP peer → local browser
     node.on("webrtc_offer",  lambda d: socketio.emit("webrtc_offer", d))
@@ -181,7 +183,7 @@ def on_send_message(data):
         if result:
             emit("message_sent", result)
         else:
-            emit("error", {"message": "Failed to send"})
+            emit("error", {"message": "Failed to send (peer unavailable, trust policy, or transport failure)"})
 
 
 @socketio.on("typing")

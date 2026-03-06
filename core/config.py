@@ -80,6 +80,12 @@ RATE_LIMIT_WINDOW    = 10        # seconds
 RATE_LIMIT_BAN_SECS  = 60        # auto-ban duration after limit exceeded
 
 # ──────────────────────────────────────────────
+# Trust policy
+# ──────────────────────────────────────────────
+# If enabled, personal text messages are accepted/sent only for seed-paired peers.
+TRUSTED_ONLY_PRIVATE_CHATS = os.environ.get("MESHLINK_TRUSTED_ONLY", "0") in ("1", "true", "True")
+
+# ──────────────────────────────────────────────
 # Helpers
 # ──────────────────────────────────────────────
 
