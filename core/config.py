@@ -57,6 +57,9 @@ VIDEO_QUALITY            = 50    # JPEG quality 1-100
 # ──────────────────────────────────────────────
 ENCRYPTION_ENABLED   = True
 KEY_EXCHANGE_TIMEOUT = 10        # seconds
+SESSION_KEY_TTL_SECONDS = int(os.environ.get("MESHLINK_SESSION_TTL_SECONDS", 24 * 3600))
+SESSION_KEY_ROTATE_SECONDS = int(os.environ.get("MESHLINK_SESSION_ROTATE_SECONDS", 3600))
+SESSION_MAINTENANCE_INTERVAL_SECONDS = float(os.environ.get("MESHLINK_SESSION_MAINTENANCE_INTERVAL_SECONDS", 15.0))
 
 # ──────────────────────────────────────────────
 # Seed Pairing
@@ -71,6 +74,9 @@ SEED_KDF_ITERATIONS  = 100_000
 # ──────────────────────────────────────────────
 MESH_TTL_DEFAULT     = 5         # max hops for a relayed message
 MESH_LRU_MAX_SIZE    = 2000      # max entries in seen-message LRU cache
+MESH_RELAY_FANOUT_MIN = int(os.environ.get("MESHLINK_RELAY_FANOUT_MIN", 2))
+MESH_RELAY_FANOUT_MAX = int(os.environ.get("MESHLINK_RELAY_FANOUT_MAX", 6))
+MESH_RELAY_BACKPRESSURE_MAX_PENDING = int(os.environ.get("MESHLINK_RELAY_BP_MAX_PENDING", 4000))
 
 # ──────────────────────────────────────────────
 # Rate limiting & Blacklist
@@ -80,10 +86,23 @@ RATE_LIMIT_WINDOW    = 10        # seconds
 RATE_LIMIT_BAN_SECS  = 60        # auto-ban duration after limit exceeded
 
 # ──────────────────────────────────────────────
+# Messaging reliability / backpressure
+# ──────────────────────────────────────────────
+CHAT_DB_MAX_MB = int(os.environ.get("MESHLINK_CHAT_DB_MAX_MB", 128))
+CHAT_DB_MAX_ROWS = int(os.environ.get("MESHLINK_CHAT_DB_MAX_ROWS", 200000))
+MESSAGING_MAX_PARALLEL_GLOBAL = int(os.environ.get("MESHLINK_MSG_MAX_PARALLEL_GLOBAL", 16))
+MESSAGING_MAX_PARALLEL_PER_PEER = int(os.environ.get("MESHLINK_MSG_MAX_PARALLEL_PER_PEER", 4))
+MESSAGING_SEND_SLOT_TIMEOUT = float(os.environ.get("MESHLINK_MSG_SEND_SLOT_TIMEOUT", 1.0))
+MESSAGING_OUTBOX_MAX_PENDING = int(os.environ.get("MESHLINK_MSG_OUTBOX_MAX_PENDING", 5000))
+
+# ──────────────────────────────────────────────
 # Trust policy
 # ──────────────────────────────────────────────
 # If enabled, personal text messages are accepted/sent only for seed-paired peers.
 TRUSTED_ONLY_PRIVATE_CHATS = os.environ.get("MESHLINK_TRUSTED_ONLY", "0") in ("1", "true", "True")
+TRUSTED_ONLY_TEXT = os.environ.get("MESHLINK_TRUSTED_ONLY_TEXT", "1" if TRUSTED_ONLY_PRIVATE_CHATS else "0") in ("1", "true", "True")
+TRUSTED_ONLY_FILE = os.environ.get("MESHLINK_TRUSTED_ONLY_FILE", "0") in ("1", "true", "True")
+TRUSTED_ONLY_CALL = os.environ.get("MESHLINK_TRUSTED_ONLY_CALL", "0") in ("1", "true", "True")
 
 # ──────────────────────────────────────────────
 # Helpers

@@ -1,5 +1,6 @@
 from core.messaging import Message, MsgType
 from core.node import MeshNode, ChatMessage
+from core.crypto import CryptoManager
 
 
 class _DummyDiscovery:
@@ -82,3 +83,70 @@ def test_security_snapshot_contains_expected_keys():
     assert "blacklist" in snap
     assert "banned" in snap
     assert "events" in snap
+
+
+def test_call_policy_blocks_outgoing_untrusted(monkeypatch):
+    node = MeshNode()
+    node.discovery = _DummyDiscovery()
+    node.discovery._peers["p1"] = _DummyPeer()
+
+    monkeypatch.setattr("core.node.TRUSTED_ONLY_CALL", True)
+    monkeypatch.setattr(node.crypto, "is_trusted", lambda peer_id: False)
+
+    ok = node.start_call("p1", "audio")
+    assert ok is False
+    events = node.get_security_events(20)
+    assert any(ev["event"] == "outgoing_call_blocked_untrusted" for ev in events)
+
+
+def test_call_policy_blocks_incoming_untrusted(monkeypatch):
+    node = MeshNode()
+    incoming = []
+    node.on("call_incoming", lambda d: incoming.append(d))
+
+    monkeypatch.setattr("core.node.TRUSTED_ONLY_CALL", True)
+    monkeypatch.setattr(node.crypto, "is_trusted", lambda peer_id: False)
+
+    msg = Message(
+        msg_type=MsgType.CALL_INVITE,
+        sender_id="peer-c",
+        sender_name="PeerC",
+        payload={"call_type": "audio"},
+        msg_id="c-1",
+    )
+    node._on_call_invite(msg)
+    assert incoming == []
+    events = node.get_security_events(20)
+    assert any(ev["event"] == "incoming_call_blocked_untrusted" for ev in events)
+
+
+def test_peer_activity_rotates_expired_or_old_session(monkeypatch):
+    node = MeshNode()
+    node.crypto._sessions["peer-r"] = object()  # type: ignore[assignment]
+    monkeypatch.setattr(node.crypto, "check_session_ttl", lambda peer_id: True)
+    monkeypatch.setattr(node.crypto, "should_rotate_session", lambda peer_id: True)
+    monkeypatch.setattr(node.crypto, "rotate_session", lambda peer_id: True)
+
+    node._on_peer_activity("peer-r")
+
+    events = node.get_security_events(20)
+    assert any(ev["event"] == "session_rotated" for ev in events)
+
+
+def test_peer_activity_expires_stale_session(monkeypatch):
+    node = MeshNode()
+    peer_crypto = CryptoManager()
+    node.crypto.establish_session("peer-exp", peer_crypto.public_key_b64)
+
+    meta = node.crypto._session_meta["peer-exp"]
+    past = meta["last_used"] - 10_000
+    meta["created_at"] = past
+    meta["last_rotated"] = past
+    meta["last_used"] = past
+    meta["ttl_seconds"] = 1
+
+    node._on_peer_activity("peer-exp")
+
+    assert node.crypto.has_session("peer-exp") is False
+    events = node.get_security_events(20)
+    assert any(ev["event"] == "session_expired" for ev in events)

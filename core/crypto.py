@@ -12,9 +12,17 @@ import base64
 import hashlib
 import secrets
 import logging
+import time
 from typing import Optional
 
-from .config import SEED_ALPHABET, SEED_LENGTH, SEED_KDF_SALT, SEED_KDF_ITERATIONS
+from .config import (
+    SEED_ALPHABET,
+    SEED_LENGTH,
+    SEED_KDF_SALT,
+    SEED_KDF_ITERATIONS,
+    SESSION_KEY_TTL_SECONDS,
+    SESSION_KEY_ROTATE_SECONDS,
+)
 
 logger = logging.getLogger("meshlink.crypto")
 
@@ -141,6 +149,10 @@ class CryptoManager:
 
         # peer_id → AES-GCM cipher (from X25519 exchange)
         self._sessions:         dict[str, SessionCipher] = {}
+        # peer_id → lifecycle metadata for E2E sessions
+        self._session_meta:     dict[str, dict] = {}
+        # peer_id → last known remote X25519 public key (base64)
+        self._session_peer_pub_b64: dict[str, str] = {}
         # peer_id → Ed25519 public key bytes (for verifying their signatures)
         self._peer_signing_keys: dict[str, bytes] = {}
         # peer_id → AES-GCM cipher (from seed-pairing — trusted channel)
@@ -172,6 +184,18 @@ class CryptoManager:
             peer_pub = base64.b64decode(peer_public_b64)
             shared   = self.keypair.derive_shared_key(peer_pub)
             self._sessions[peer_id] = SessionCipher(shared)
+            now = time.time()
+            prev = self._session_meta.get(peer_id) or {}
+            self._session_meta[peer_id] = {
+                "created_at": float(prev.get("created_at", now)),
+                "last_rotated": now,
+                "last_used": now,
+                "rotation_count": int(prev.get("rotation_count", 0)) + 1,
+                "ttl_seconds": int(max(1, SESSION_KEY_TTL_SECONDS)),
+                "rotation_interval_seconds": int(max(1, SESSION_KEY_ROTATE_SECONDS)),
+                "expired": False,
+            }
+            self._session_peer_pub_b64[peer_id] = peer_public_b64
             logger.info(f"E2E session established with {peer_id}")
         except Exception as e:
             logger.error(f"Session establishment failed for {peer_id}: {e}")
@@ -190,12 +214,99 @@ class CryptoManager:
     def has_session(self, peer_id: str) -> bool:
         return peer_id in self._sessions
 
+    def touch_session(self, peer_id: str):
+        meta = self._session_meta.get(peer_id)
+        if meta:
+            meta["last_used"] = time.time()
+
+    def _is_session_expired(self, peer_id: str, now: Optional[float] = None) -> bool:
+        meta = self._session_meta.get(peer_id)
+        if not meta:
+            return False
+        now_ts = float(now if now is not None else time.time())
+        ttl = max(1, int(meta.get("ttl_seconds", SESSION_KEY_TTL_SECONDS)))
+        created = float(meta.get("created_at", now_ts))
+        rotated = float(meta.get("last_rotated", created))
+        last_used = float(meta.get("last_used", rotated))
+        cutoff = max(created, rotated, last_used)
+        return (now_ts - cutoff) >= ttl
+
+    def check_session_ttl(self, peer_id: str) -> bool:
+        """Returns True when session is valid. Removes expired session safely."""
+        if peer_id not in self._sessions:
+            return False
+        if not self._is_session_expired(peer_id):
+            return True
+        self._sessions.pop(peer_id, None)
+        meta = self._session_meta.get(peer_id)
+        if meta:
+            meta["expired"] = True
+        return False
+
+    def should_rotate_session(self, peer_id: str, now: Optional[float] = None) -> bool:
+        if peer_id not in self._sessions:
+            return False
+        meta = self._session_meta.get(peer_id)
+        if not meta:
+            return True
+        now_ts = float(now if now is not None else time.time())
+        interval = max(1, int(meta.get("rotation_interval_seconds", SESSION_KEY_ROTATE_SECONDS)))
+        last_rotated = float(meta.get("last_rotated", meta.get("created_at", now_ts)))
+        return (now_ts - last_rotated) >= interval
+
+    def rotate_session(self, peer_id: str) -> bool:
+        """Safely rotates session using last known remote X25519 public key."""
+        peer_public_b64 = self._session_peer_pub_b64.get(peer_id)
+        if not peer_public_b64:
+            return False
+        prev_created = float((self._session_meta.get(peer_id) or {}).get("created_at", time.time()))
+        self.establish_session(peer_id, peer_public_b64)
+        meta = self._session_meta.get(peer_id)
+        if meta:
+            meta["created_at"] = prev_created
+            meta["expired"] = False
+        return peer_id in self._sessions
+
+    def maintain_sessions(self) -> dict:
+        """TTL/rotation maintenance for all known E2E sessions."""
+        now = time.time()
+        expired: list[str] = []
+        rotated: list[str] = []
+        for peer_id in list(self._sessions.keys()):
+            if self._is_session_expired(peer_id, now=now):
+                self._sessions.pop(peer_id, None)
+                meta = self._session_meta.get(peer_id)
+                if meta:
+                    meta["expired"] = True
+                expired.append(peer_id)
+                continue
+            if self.should_rotate_session(peer_id, now=now) and self.rotate_session(peer_id):
+                rotated.append(peer_id)
+        return {"expired": expired, "rotated": rotated}
+
+    def get_session_snapshot(self) -> dict:
+        """Returns non-sensitive session lifecycle metadata per peer."""
+        out = {}
+        for peer_id, meta in self._session_meta.items():
+            out[peer_id] = {
+                "created_at": float(meta.get("created_at", 0.0)),
+                "last_rotated": float(meta.get("last_rotated", 0.0)),
+                "last_used": float(meta.get("last_used", 0.0)),
+                "rotation_count": int(meta.get("rotation_count", 0)),
+                "ttl_seconds": int(meta.get("ttl_seconds", SESSION_KEY_TTL_SECONDS)),
+                "rotation_interval_seconds": int(meta.get("rotation_interval_seconds", SESSION_KEY_ROTATE_SECONDS)),
+                "active": peer_id in self._sessions,
+                "expired": bool(meta.get("expired", False)),
+            }
+        return out
+
     # ── E2E Encrypt / Decrypt ──────────────────────────────────────────────
 
     def encrypt_for(self, peer_id: str, plaintext: bytes) -> bytes:
         """Encrypt plaintext for a peer. Returns ciphertext (or plaintext if no session)."""
         cipher = self._sessions.get(peer_id)
         if cipher:
+            self.touch_session(peer_id)
             return cipher.encrypt(plaintext)
         return plaintext
 
@@ -203,6 +314,7 @@ class CryptoManager:
         """Decrypt ciphertext from a peer. Raises on auth failure."""
         cipher = self._sessions.get(peer_id)
         if cipher:
+            self.touch_session(peer_id)
             return cipher.decrypt(data)
         return data
 
