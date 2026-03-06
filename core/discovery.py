@@ -1,6 +1,7 @@
 """
 MeshLink — Peer Discovery via UDP Broadcast / Multicast
 Discovers peers on LAN without any central server.
+Announces both the X25519 DH public key and Ed25519 signing public key.
 """
 
 import json
@@ -25,15 +26,17 @@ logger = logging.getLogger("meshlink.discovery")
 @dataclass
 class PeerInfo:
     """Represents a discovered peer on the network."""
-    peer_id: str
-    name: str
-    ip: str
-    tcp_port: int
-    media_port: int
-    file_port: int = 5153
-    public_key: str = ""
-    last_seen: float = field(default_factory=time.time)
-    status: str = "online"      # online / busy / away
+    peer_id:     str
+    name:        str
+    ip:          str
+    tcp_port:    int
+    media_port:  int
+    file_port:   int   = 5153
+    public_key:  str   = ""   # X25519 DH public key (base64)
+    signing_key: str   = ""   # Ed25519 signing public key (base64)
+    last_seen:   float = field(default_factory=time.time)
+    status:      str   = "online"   # online / busy / away
+    trusted:     bool  = False      # True after seed-pairing
 
     @property
     def is_alive(self) -> bool:
@@ -51,34 +54,36 @@ class DiscoveryService:
     Uses both UDP broadcast AND multicast for maximum compatibility.
     """
 
-    def __init__(self, public_key_b64: str = ""):
+    def __init__(self, public_key_b64: str = "", signing_key_b64: str = ""):
         self.peers: Dict[str, PeerInfo] = {}
-        self._lock = threading.Lock()
-        self._running = False
-        self._public_key = public_key_b64
+        self._lock      = threading.Lock()
+        self._running   = False
+        self._public_key  = public_key_b64
+        self._signing_key = signing_key_b64
 
         # Callbacks
         self.on_peer_joined: Optional[Callable[[PeerInfo], None]] = None
-        self.on_peer_left: Optional[Callable[[PeerInfo], None]] = None
+        self.on_peer_left:   Optional[Callable[[PeerInfo], None]] = None
 
-    # ── Build announcement payload ──────────────────────────
+    # ── Build announcement payload ──────────────────────────────────────────
 
     def _make_announcement(self) -> bytes:
         payload = {
-            "id": NODE_ID,
-            "name": NODE_NAME,
-            "ip": LOCAL_IP,
-            "tcp_port": TCP_PORT,
-            "media_port": MEDIA_PORT,
-            "file_port": FILE_PORT,
-            "public_key": self._public_key,
-            "status": "online",
-            "ts": time.time(),
+            "id":          NODE_ID,
+            "name":        NODE_NAME,
+            "ip":          LOCAL_IP,
+            "tcp_port":    TCP_PORT,
+            "media_port":  MEDIA_PORT,
+            "file_port":   FILE_PORT,
+            "public_key":  self._public_key,
+            "signing_key": self._signing_key,
+            "status":      "online",
+            "ts":          time.time(),
         }
         data = json.dumps(payload).encode("utf-8")
         return DISCOVERY_MAGIC + data
 
-    # ── Broadcaster ─────────────────────────────────────────
+    # ── Broadcaster ─────────────────────────────────────────────────────────
 
     def _broadcast_loop(self):
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -86,7 +91,6 @@ class DiscoveryService:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         sock.settimeout(1.0)
 
-        # Also set up multicast sending
         ttl = struct.pack("b", 1)
         sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, ttl)
 
@@ -95,9 +99,7 @@ class DiscoveryService:
         while self._running:
             try:
                 msg = self._make_announcement()
-                # UDP broadcast
                 sock.sendto(msg, (BROADCAST_ADDR, DISCOVERY_PORT))
-                # Multicast
                 try:
                     sock.sendto(msg, (MULTICAST_GROUP, DISCOVERY_PORT))
                 except Exception:
@@ -107,7 +109,7 @@ class DiscoveryService:
             time.sleep(DISCOVERY_INTERVAL)
         sock.close()
 
-    # ── Listener ────────────────────────────────────────────
+    # ── Listener ────────────────────────────────────────────────────────────
 
     def _listen_loop(self):
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -121,7 +123,7 @@ class DiscoveryService:
         # Join multicast group
         try:
             group = socket.inet_aton(MULTICAST_GROUP)
-            mreq = struct.pack("4sL", group, socket.INADDR_ANY)
+            mreq  = struct.pack("4sL", group, socket.INADDR_ANY)
             sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
         except Exception as e:
             logger.debug(f"Multicast join failed: {e}")
@@ -149,24 +151,28 @@ class DiscoveryService:
             return
 
         peer_id = payload.get("id", "")
-        if peer_id == NODE_ID:
+        if not peer_id or peer_id == NODE_ID:
             return  # ignore self
 
         is_new = peer_id not in self.peers
 
         peer = PeerInfo(
-            peer_id=peer_id,
-            name=payload.get("name", "Unknown"),
-            ip=payload.get("ip", addr[0]),
-            tcp_port=payload.get("tcp_port", TCP_PORT),
-            media_port=payload.get("media_port", MEDIA_PORT),
-            file_port=payload.get("file_port", FILE_PORT),
-            public_key=payload.get("public_key", ""),
-            last_seen=time.time(),
-            status=payload.get("status", "online"),
+            peer_id=    peer_id,
+            name=       payload.get("name", "Unknown"),
+            ip=         payload.get("ip", addr[0]),
+            tcp_port=   payload.get("tcp_port",   TCP_PORT),
+            media_port= payload.get("media_port", MEDIA_PORT),
+            file_port=  payload.get("file_port",  FILE_PORT),
+            public_key= payload.get("public_key",  ""),
+            signing_key=payload.get("signing_key", ""),
+            last_seen=  time.time(),
+            status=     payload.get("status", "online"),
         )
 
         with self._lock:
+            # Preserve trust flag if peer was already known
+            if not is_new:
+                peer.trusted = self.peers[peer_id].trusted
             self.peers[peer_id] = peer
 
         if is_new:
@@ -174,7 +180,7 @@ class DiscoveryService:
             if self.on_peer_joined:
                 self.on_peer_joined(peer)
 
-    # ── Cleanup stale peers ─────────────────────────────────
+    # ── Cleanup stale peers ─────────────────────────────────────────────────
 
     def _cleanup_loop(self):
         while self._running:
@@ -190,13 +196,13 @@ class DiscoveryService:
                 if self.on_peer_left:
                     self.on_peer_left(p)
 
-    # ── Public API ──────────────────────────────────────────
+    # ── Public API ──────────────────────────────────────────────────────────
 
     def start(self):
         self._running = True
         threading.Thread(target=self._broadcast_loop, daemon=True, name="discovery-tx").start()
-        threading.Thread(target=self._listen_loop, daemon=True, name="discovery-rx").start()
-        threading.Thread(target=self._cleanup_loop, daemon=True, name="discovery-gc").start()
+        threading.Thread(target=self._listen_loop,    daemon=True, name="discovery-rx").start()
+        threading.Thread(target=self._cleanup_loop,   daemon=True, name="discovery-gc").start()
 
     def stop(self):
         self._running = False
@@ -208,3 +214,9 @@ class DiscoveryService:
     def get_peer(self, peer_id: str) -> Optional[PeerInfo]:
         with self._lock:
             return self.peers.get(peer_id)
+
+    def mark_trusted(self, peer_id: str):
+        """Mark a peer as seed-paired / trusted."""
+        with self._lock:
+            if peer_id in self.peers:
+                self.peers[peer_id].trusted = True
