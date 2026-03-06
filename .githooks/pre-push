@@ -1,19 +1,13 @@
 #!/bin/sh
-IDENTITIES_FILE=".githooks/allowed-identities.txt"
+expected_name="Andrey"
+expected_email="andreylikhatin@gmail.com"
 
 name=$(git config --get user.name)
 email=$(git config --get user.email)
-identity="$name <$email>"
 
-if [ ! -f "$IDENTITIES_FILE" ]; then
-  echo "ERROR: identities file not found: $IDENTITIES_FILE" >&2
-  exit 1
-fi
-
-if ! grep -Fqx "$identity" "$IDENTITIES_FILE"; then
+if [ "$name" != "$expected_name" ] || [ "$email" != "$expected_email" ]; then
   echo "ERROR: push blocked due to git identity mismatch" >&2
-  echo "Current: $identity" >&2
-  echo "Allowed identities are listed in $IDENTITIES_FILE" >&2
+  echo "Current: $name <$email>" >&2
   exit 1
 fi
 
@@ -35,16 +29,9 @@ do
     ae=$(git show -s --format=%ae "$c")
     cn=$(git show -s --format=%cn "$c")
     ce=$(git show -s --format=%ce "$c")
-    a_identity="$an <$ae>"
-    c_identity="$cn <$ce>"
-    if ! grep -Fqx "$a_identity" "$IDENTITIES_FILE"; then
+    if [ "$an" != "$expected_name" ] || [ "$ae" != "$expected_email" ] || [ "$cn" != "$expected_name" ] || [ "$ce" != "$expected_email" ]; then
       echo "ERROR: push blocked; new commit $c has unexpected identity" >&2
-      echo "author: $a_identity" >&2
-      exit 1
-    fi
-    if ! grep -Fqx "$c_identity" "$IDENTITIES_FILE"; then
-      echo "ERROR: push blocked; new commit $c has unexpected identity" >&2
-      echo "committer: $c_identity" >&2
+      echo "author: $an <$ae>; committer: $cn <$ce>" >&2
       exit 1
     fi
   done

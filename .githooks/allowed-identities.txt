@@ -1,4 +1,0 @@
-# Формат: Name <email>
-Andrey <andreylikhatin@gmail.com>
-
-# Добавьте ещё 3 участников команды ниже в таком же формате.
