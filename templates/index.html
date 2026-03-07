@@ -773,6 +773,7 @@ function selectPeer(pid){
     socket.emit('get_chat',{peer_id:pid});
     renderMsgs(pid);scrollBot();
     updatePairBanner();
+    updateCallButtons();
 }
 
 function selectGroup(groupId){
@@ -791,6 +792,24 @@ function selectGroup(groupId){
     socket.emit('get_chat',{peer_id:pid});
     renderMsgs(pid);scrollBot();
     updatePairBanner();
+    updateCallButtons();
+}
+
+function updateCallButtons(){
+    const isGroup = isGroupKey(S.activePeer);
+    const callButtons = document.querySelectorAll('.chat-actions .btn-icon[onclick^="initiateCall"]');
+    callButtons.forEach(btn => {
+        btn.disabled = isGroup;
+        btn.style.opacity = isGroup ? '0.35' : '';
+        btn.style.cursor = isGroup ? 'not-allowed' : '';
+        if(isGroup){
+            btn.title = 'Group calls are not supported yet';
+        } else if(btn.getAttribute('onclick')?.includes("'audio'")){
+            btn.title = 'Voice call';
+        } else {
+            btn.title = 'Video call';
+        }
+    });
 }
 
 function ensureGroupActions(groupId){
@@ -1080,6 +1099,10 @@ function completeXfer(d){
 // ═══════════════════════════════════════════════
 function initiateCall(type){
     if(!S.activePeer)return;
+    if(isGroupKey(S.activePeer)){
+        toast('Групповые звонки пока не поддерживаются. Выберите конкретного peer для звонка.');
+        return;
+    }
     S.callPeer=S.activePeer; S.callType=type; S.callDir='outgoing';
     socket.emit('start_call',{peer_id:S.activePeer,call_type:type});
 }
