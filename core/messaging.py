@@ -28,6 +28,7 @@ from .config import (
     MESSAGING_MAX_PARALLEL_GLOBAL,
     MESSAGING_MAX_PARALLEL_PER_PEER,
     MESSAGING_SEND_SLOT_TIMEOUT,
+    MESSAGING_CONNECT_TIMEOUT,
     MESSAGING_OUTBOX_MAX_PENDING,
 )
 from . import storage
@@ -507,7 +508,7 @@ class MessageServer:
                     if not sock:
                         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-                        sock.settimeout(5)
+                        sock.settimeout(MESSAGING_CONNECT_TIMEOUT)
                         sock.connect((ip, port))
                         if peer_id:
                             with self._lock:
