@@ -334,6 +334,17 @@ def on_create_group(data):
 def on_get_groups():
     emit("groups_list", node.get_groups())
 
+@socketio.on("add_group_members")
+def on_add_group_members(data):
+    group_id = (data or {}).get("group_id", "")
+    members = list((data or {}).get("members", []) or [])
+    updated = node.add_group_members(group_id, members)
+    if updated:
+        emit("group_updated", updated)
+        emit("groups_list", node.get_groups())
+    else:
+        emit("error", {"message": "Failed to add group members"})
+
 @socketio.on("send_group_message")
 def on_send_group_message(data):
     group_id = (data or {}).get("group_id", "")

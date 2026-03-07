@@ -816,6 +816,30 @@ class MeshNode:
         with self._group_lock:
             return [dict(v) for _, v in sorted(self.groups.items(), key=lambda x: x[1].get("name", ""))]
 
+    def add_group_members(self, group_id: str, members: List[str]) -> Optional[dict]:
+        group_id = str(group_id or "").strip()
+        if not group_id:
+            return None
+
+        with self._group_lock:
+            existing = dict(self.groups.get(group_id) or {})
+        if not existing:
+            return None
+
+        allowed = []
+        for pid in sorted(set(members or [])):
+            if not pid or pid == NODE_ID:
+                continue
+            peer = self.discovery.get_peer(pid)
+            if not peer:
+                continue
+            if not self.crypto.is_trusted(pid):
+                continue
+            allowed.append(pid)
+
+        merged = list(existing.get("members", [])) + allowed
+        return self._upsert_group(group_id, existing.get("name", ""), merged)
+
     def send_group_text(self, group_id: str, text: str) -> Optional[dict]:
         group_id = str(group_id or "").strip()
         text = str(text or "").strip()

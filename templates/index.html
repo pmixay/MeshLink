@@ -786,10 +786,38 @@ function selectGroup(groupId){
     document.getElementById('chat-avatar').textContent='#';
     document.getElementById('chat-peer-name').textContent=g.name || `Group ${String(groupId).slice(0,6)}`;
     document.getElementById('chat-peer-status').textContent=`group · ${(g.members||[]).length} members`;
+    ensureGroupActions(groupId);
     restoreSeedUi(null);
     socket.emit('get_chat',{peer_id:pid});
     renderMsgs(pid);scrollBot();
     updatePairBanner();
+}
+
+function ensureGroupActions(groupId){
+    const actions = document.querySelector('.chat-actions');
+    if(!actions) return;
+    let btn = document.getElementById('btn-add-group-member');
+    if(!btn){
+        btn = document.createElement('button');
+        btn.id = 'btn-add-group-member';
+        btn.className = 'btn-icon';
+        btn.title = 'Add member to group';
+        btn.innerHTML = '+';
+        btn.style.fontSize = '20px';
+        btn.onclick = () => addMemberToActiveGroup();
+        actions.prepend(btn);
+    }
+    btn.style.display = isGroupKey(S.activePeer) ? '' : 'none';
+}
+
+function addMemberToActiveGroup(){
+    if(!isGroupKey(S.activePeer)) return;
+    const gid = groupIdFromKey(S.activePeer);
+    const val = prompt('Введите peer_id нового участника (например: nodec):');
+    if(!val) return;
+    const members = val.split(',').map(x=>x.trim()).filter(Boolean);
+    if(!members.length) return;
+    socket.emit('add_group_members', {group_id: gid, members});
 }
 
 function updatePairBanner(){

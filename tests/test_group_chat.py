@@ -33,3 +33,18 @@ def test_group_message_roundtrip_in_memory(monkeypatch):
     chat = node.get_chat(f"group:{g['group_id']}")
     assert any(m.get("text") == "hello all" for m in chat)
 
+
+def test_add_group_members(monkeypatch):
+    node = MeshNode()
+    node.discovery = _DummyDiscovery()
+    node.discovery._peers["p1"] = _DummyPeer(tcp_port=21001)
+    node.discovery._peers["p2"] = _DummyPeer(tcp_port=21011)
+
+    monkeypatch.setattr(node.crypto, "is_trusted", lambda pid: pid in ("p1", "p2"))
+    monkeypatch.setattr(node.msg_server, "send_to_peer", lambda *args, **kwargs: True)
+
+    g = node.create_group("Ops", ["p1"])
+    upd = node.add_group_members(g["group_id"], ["p2"])
+    assert upd is not None
+    assert "p2" in (upd.get("members") or [])
+
