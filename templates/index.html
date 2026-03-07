@@ -206,6 +206,9 @@
             <div id="peers-list">
                 <div class="no-peers"><p>Scanning for peers on your network...</p></div>
             </div>
+            <div class="section-label" style="margin-top:10px">Groups</div>
+            <button class="btn-add-peer" onclick="showCreateGroupModal()">+ New Group</button>
+            <div id="groups-list"></div>
         </div>
         <div class="stats-panel">
             <div class="stats-title">Statistics</div>
@@ -345,6 +348,29 @@
     </div>
 </div>
 
+<!-- Create Group Modal -->
+<div class="modal" id="create-group-modal">
+    <div class="modal-content">
+        <div class="modal-header">
+            <div class="modal-title">Create Group</div>
+        </div>
+        <div class="modal-body">
+            <div class="form-group">
+                <label class="form-label">Group name</label>
+                <input type="text" class="form-input" id="group-name" placeholder="Team Alpha">
+            </div>
+            <div class="form-group">
+                <label class="form-label">Members (comma-separated peer IDs)</label>
+                <input type="text" class="form-input" id="group-members" placeholder="peerA,peerB">
+            </div>
+        </div>
+        <div class="modal-actions">
+            <button class="btn-modal cancel" onclick="hideCreateGroupModal()">Cancel</button>
+            <button class="btn-modal" onclick="createGroup()">Create</button>
+        </div>
+    </div>
+</div>
+
 <div class="toasts" id="toasts"></div>
 <input type="file" id="file-input" style="display:none" onchange="handleFileSelect(event)">
 
@@ -354,6 +380,7 @@
 // ═══════════════════════════════════════════════
 const S = {
     nodeId:'', nodeName:'', peers:[], activePeer:null,
+    groups:[],
     messages:{}, unread:{}, trustedPeers:new Set(),
     callPeer:null, callType:null, callDir:null,
     callTimer:null, callSec:0, callActive:false,
@@ -370,6 +397,9 @@ const S = {
 let pc = null;
 let localStream = null;
 let _rtcStatsInterval = null;
+
+function isGroupKey(pid){ return typeof pid === 'string' && pid.startsWith('group:'); }
+function groupIdFromKey(pid){ return isGroupKey(pid) ? pid.slice(6) : ''; }
 
 const COLORS = ['#6c63ff','#3dd68c','#ffa94d','#22d3ee','#ff6b6b','#a78bfa','#f472b6','#34d399'];
 function pColor(id){let h=0;for(let i=0;i<id.length;i++)h=id.charCodeAt(i)+((h<<5)-h);return COLORS[Math.abs(h)%COLORS.length]}
@@ -458,6 +488,27 @@ socket.on('peers_list', p => {
     }
 });
 
+socket.on('groups_list', groups => {
+    S.groups = Array.isArray(groups) ? groups : [];
+    renderGroups();
+});
+
+socket.on('group_created', g => {
+    if(!g || !g.group_id) return;
+    const idx = S.groups.findIndex(x => x.group_id === g.group_id);
+    if(idx >= 0) S.groups[idx] = g;
+    else S.groups.push(g);
+    renderGroups();
+});
+
+socket.on('group_updated', g => {
+    if(!g || !g.group_id) return;
+    const idx = S.groups.findIndex(x => x.group_id === g.group_id);
+    if(idx >= 0) S.groups[idx] = g;
+    else S.groups.push(g);
+    renderGroups();
+});
+
 socket.on('peer_joined', p => {
     const i=S.peers.findIndex(x=>x.peer_id===p.peer_id);
     if(i>=0)S.peers[i]=p; else S.peers.push(p);
@@ -526,6 +577,30 @@ socket.on('message_status', d => {
     const arr=S.messages[pid]||[];
     const msg=arr.find(x=>x.msg_id===d.msg_id);
     if(msg){ msg.status=d.status; if(S.activePeer===pid) renderMsgs(pid, true); }
+});
+
+socket.on('group_message', m => {
+    const gid = m.group_id;
+    if(!gid) return;
+    const pid = `group:${gid}`;
+    if(!S.messages[pid]) S.messages[pid] = [];
+    if(!S.messages[pid].find(x => x.msg_id === m.msg_id)) {
+        S.messages[pid].push(m);
+    }
+    if(S.activePeer===pid){renderMsgs(pid);scrollBotIfNear();}
+    else{S.unread[pid]=(S.unread[pid]||0)+1;renderGroups();}
+});
+
+socket.on('group_message_sent', m => {
+    const gid = m.group_id;
+    if(!gid) return;
+    const pid = `group:${gid}`;
+    if(!S.messages[pid]) S.messages[pid] = [];
+    const arr = S.messages[pid];
+    const existing = arr.findIndex(x => x.msg_id === m.msg_id);
+    if(existing >= 0) arr[existing] = {...arr[existing], ...m};
+    else arr.push(m);
+    if(S.activePeer===pid){renderMsgs(pid);scrollBot();}
 });
 
 socket.on('typing', d => { if(d.peer_id===S.activePeer) showTyping(d.peer_name); });
@@ -603,7 +678,7 @@ socket.on('webrtc_ice', async d => {
 });
 
 setInterval(()=>socket.emit('get_peers'),5000);
-socket.on('connect', () => { socket.emit('get_peers'); });
+socket.on('connect', () => { socket.emit('get_peers'); socket.emit('get_groups'); });
 
 // Fetch initial stats
 fetch('/api/statistics').then(r=>r.json()).then(d=>{S.stats=d;renderStats();}).catch(()=>{});
@@ -632,6 +707,30 @@ function renderPeers(){
     }).join('');
 }
 
+function renderGroups(){
+    const el=document.getElementById('groups-list');
+    if(!el) return;
+    if(!S.groups.length){
+        el.innerHTML='<div class="no-peers" style="padding:12px 6px"><p>No groups yet</p></div>';
+        return;
+    }
+    el.innerHTML=S.groups.map(g=>{
+        const pid = `group:${g.group_id}`;
+        const a=S.activePeer===pid?' active':'';
+        const u=S.unread[pid]||0;
+        const name = g.name || `Group ${String(g.group_id).slice(0,6)}`;
+        const members = Array.isArray(g.members) ? g.members.length : 0;
+        return `<div class="peer-item${a}" onclick="selectGroup('${g.group_id}')">
+            <div class="peer-avatar" style="background:var(--accent)">#</div>
+            <div class="peer-info">
+                <div class="peer-name">${escHtml(name)}</div>
+                <div class="peer-status-line">${members} members</div>
+            </div>
+            ${u?`<div class="peer-unread">${u}</div>`:''}
+        </div>`;
+    }).join('');
+}
+
 function selectPeer(pid){
     S.activePeer=pid; S.unread[pid]=0; renderPeers();
     persistActivePeer(pid);
@@ -649,9 +748,26 @@ function selectPeer(pid){
     updatePairBanner();
 }
 
+function selectGroup(groupId){
+    const pid = `group:${groupId}`;
+    S.activePeer=pid; S.unread[pid]=0; renderPeers(); renderGroups();
+    persistActivePeer(pid);
+    const g=S.groups.find(x=>x.group_id===groupId); if(!g)return;
+    document.getElementById('welcome-screen').style.display='none';
+    document.getElementById('chat-view').style.display='flex';
+    document.getElementById('chat-avatar').style.background='var(--accent)';
+    document.getElementById('chat-avatar').textContent='#';
+    document.getElementById('chat-peer-name').textContent=g.name || `Group ${String(groupId).slice(0,6)}`;
+    document.getElementById('chat-peer-status').textContent=`group · ${(g.members||[]).length} members`;
+    restoreSeedUi(null);
+    socket.emit('get_chat',{peer_id:pid});
+    renderMsgs(pid);scrollBot();
+    updatePairBanner();
+}
+
 function updatePairBanner(){
     const banner = document.getElementById('pair-banner');
-    if(!S.activePeer){banner.classList.remove('visible');return;}
+    if(!S.activePeer || isGroupKey(S.activePeer)){banner.classList.remove('visible'); btnSend.disabled = !msgInput.value.trim(); return;}
     banner.classList.toggle('visible', !S.trustedPeers.has(S.activePeer));
     btnSend.disabled = !msgInput.value.trim() || !S.trustedPeers.has(S.activePeer);
 }
@@ -756,7 +872,7 @@ function scrollBotIfNear(){if(isNearBottom())scrollBot();}
 const msgInput=document.getElementById('msg-input');
 const btnSend=document.getElementById('btn-send');
 msgInput.addEventListener('input',()=>{
-    btnSend.disabled = !msgInput.value.trim() || !S.trustedPeers.has(S.activePeer);
+    btnSend.disabled = !msgInput.value.trim() || (!isGroupKey(S.activePeer) && !S.trustedPeers.has(S.activePeer));
     msgInput.style.height='auto';
     msgInput.style.height=Math.min(msgInput.scrollHeight,120)+'px';
 });
@@ -771,6 +887,13 @@ function handleTyping(){
 function sendMessage(){
     const t=msgInput.value.trim();if(!t||!S.activePeer)return;
 
+    if(isGroupKey(S.activePeer)){
+        const gid = groupIdFromKey(S.activePeer);
+        socket.emit('send_group_message',{group_id:gid,text:t});
+        msgInput.value='';msgInput.style.height='auto';btnSend.disabled=true;
+        return;
+    }
+
     // Create optimistic local message with pending ID
     const pendingId = '_pending_' + Date.now();
     S._pendingMsgId = pendingId;
@@ -783,6 +906,25 @@ function sendMessage(){
 
     socket.emit('send_message',{peer_id:S.activePeer,text:t});
     msgInput.value='';msgInput.style.height='auto';btnSend.disabled=true;
+}
+
+function showCreateGroupModal(){
+    document.getElementById('create-group-modal').classList.add('visible');
+}
+
+function hideCreateGroupModal(){
+    document.getElementById('create-group-modal').classList.remove('visible');
+    document.getElementById('group-name').value='';
+    document.getElementById('group-members').value='';
+}
+
+function createGroup(){
+    const name = (document.getElementById('group-name').value || '').trim();
+    const raw = (document.getElementById('group-members').value || '').trim();
+    const members = raw ? raw.split(',').map(x=>x.trim()).filter(Boolean) : [];
+    socket.emit('create_group', {name, members});
+    hideCreateGroupModal();
+    toast('Group created');
 }
 
 let typHide=null;

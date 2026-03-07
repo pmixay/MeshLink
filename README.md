@@ -67,17 +67,7 @@ templates/
 
 ### Архитектурная схема
 
-```mermaid
-flowchart LR
-    UI[Web UI] --> WS[web/server.py\nFlask + Socket.IO]
-    WS --> NODE[core/node.py\nMeshNode]
-    NODE --> DISC[core/discovery.py]
-    NODE --> MSG[core/messaging.py]
-    NODE --> FILE[core/file_transfer.py]
-    NODE --> MEDIA[core/media.py]
-    NODE --> CRYPTO[core/crypto.py]
-    NODE --> DB[core/storage.py\nSQLite]
-```
+Подробная схема вынесена в отдельный артефакт: `docs/ARCHITECTURE.md`.
 
 ### Топология
 
@@ -187,6 +177,9 @@ python main.py --name "Charlie" --web-port 8082 --tcp-port 5171 --media-port 517
 
 Показатели отображаются в интерфейсе в реальном времени.
 
+Формализованная методика замеров и шаблон таблицы результатов:
+- `docs/REALTIME_MEASUREMENTS.md`
+
 ---
 
 ## 9) Передача файлов
@@ -224,6 +217,18 @@ python main.py --name "Charlie" --web-port 8082 --tcp-port 5171 --media-port 517
 - спам/флуд;
 - деградация канала (loss/jitter/disconnect).
 
+Отдельный документ с границами доверия и остаточными рисками:
+- `docs/THREAT_MODEL.md`
+
+---
+
+## 10.1) Fallback-архитектура NAT/STUN-TURN
+
+В репозиторий добавлен проектный документ fallback-стратегии:
+- `docs/NAT_FALLBACK.md`
+
+Текущая реализация ориентирована на LAN; документ описывает переход к STUN/TURN-режиму и политику выбора ICE.
+
 ---
 
 ## 11) Документация и тестируемость
@@ -259,6 +264,7 @@ python -m pytest -q
 - `GET /api/peers`
 - `GET /api/chat/<peer_id>`
 - `GET /api/transfers`
+- `GET /api/groups`
 - `GET /api/statistics`
 - `POST /api/upload`
 - `POST /api/add_peer`
@@ -278,6 +284,7 @@ python -m pytest -q
 Входящие события:
 
 - `send_message`, `typing`, `get_peers`, `get_chat`
+- `create_group`, `get_groups`, `send_group_message`
 - `start_call`, `accept_call`, `reject_call`, `end_call`
 - `webrtc_offer`, `webrtc_answer`, `webrtc_ice`
 - `seed_pair`, `blacklist_peer`
@@ -285,6 +292,7 @@ python -m pytest -q
 Исходящие события:
 
 - `node_info`, `peers_list`, `statistics`
+- `groups_list`, `group_created`, `group_updated`, `group_message`, `group_message_sent`
 - `peer_joined`, `peer_left`
 - `message`, `message_sent`, `message_status`
 - `typing`
