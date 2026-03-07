@@ -276,7 +276,7 @@
     </div>
 
     <!-- Active call state -->
-    <div id="active-call-ui" style="display:none;width:100%;display:flex;flex-direction:column;align-items:center;gap:20px">
+    <div id="active-call-ui" style="display:none;width:100%;flex-direction:column;align-items:center;gap:20px">
         <!-- Video area -->
         <div class="call-videos" id="call-videos" style="display:none">
             <video id="remote-video" autoplay playsinline></video>
@@ -434,8 +434,8 @@ socket.on('call_accepted', d => {
     // Remote accepted → we (caller) create WebRTC offer
     if(S.callDir==='outgoing') startWebRTC(true);
 });
-socket.on('call_rejected', () => { hideCall(); toast('Call declined'); });
-socket.on('call_ended', () => { cleanupCall(); hideCall(); });
+socket.on('call_rejected', () => { cleanupCall(); hideCall(); toast('Call declined'); });
+socket.on('call_ended', () => { cleanupCall(); hideCall(); toast('Call ended'); });
 
 // WebRTC signaling (relayed via TCP between peers)
 socket.on('webrtc_offer', async d => {
@@ -455,7 +455,9 @@ socket.on('webrtc_ice', async d => {
     }
 });
 
+// Refresh peers every 5 seconds AND immediately on reconnect
 setInterval(()=>socket.emit('get_peers'),5000);
+socket.on('connect', () => { socket.emit('get_peers'); });
 
 // ════════════════════════════════════════════════════
 //  RENDERING

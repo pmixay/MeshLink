@@ -566,14 +566,22 @@ class MeshNode:
         })
 
     def _on_call_accept(self, msg: Message):
+        """Remote peer accepted our call — start media engine on caller side."""
+        peer = self.discovery.get_peer(msg.sender_id)
+        if peer:
+            self.media.start_call(peer.ip, peer.media_port)
         self._emit("call_accepted", {"peer_id": msg.sender_id})
 
     def _on_call_reject(self, msg: Message):
+        """Remote peer rejected our call."""
         self.current_call_peer = None
+        self.media.end_call()
         self._emit("call_rejected", {"peer_id": msg.sender_id})
 
     def _on_call_end(self, msg: Message):
+        """Remote peer ended the call."""
         self.current_call_peer = None
+        self.media.end_call()
         self._emit("call_ended", {"peer_id": msg.sender_id})
 
     def _on_typing(self, msg: Message):
@@ -632,21 +640,23 @@ class MeshNode:
             })
             return
 
-        # Deliver locally
+        # Deliver locally — use original sender from inner_payload if available
         if inner_type == MsgType.TEXT:
-            if not self._is_trusted_allowed(msg.sender_id, "text", "incoming", msg_id=msg.msg_id):
+            origin_id = inner_payload.get("origin_id", msg.sender_id)
+            origin_name = inner_payload.get("origin_name", msg.sender_name)
+            if not self._is_trusted_allowed(origin_id, "text", "incoming", msg_id=msg.msg_id):
                 return
             text = inner_payload.get("text", "")
             chat_msg = ChatMessage(
                 msg_id=      msg.msg_id,
-                sender_id=   msg.sender_id,
-                sender_name= msg.sender_name,
+                sender_id=   origin_id,
+                sender_name= origin_name,
                 text=        text,
                 timestamp=   msg.timestamp,
                 is_me=       False,
                 status=      "delivered",
             )
-            is_new = self._upsert_chat_message(msg.sender_id, chat_msg)
+            is_new = self._upsert_chat_message(origin_id, chat_msg)
             if is_new:
                 self._emit("message", chat_msg.to_dict())
 
@@ -706,6 +716,8 @@ class MeshNode:
                 ttl=         msg.ttl - 1,
                 relay_path=  msg.relay_path + [NODE_ID],
             )
+            if not relay_msg.msg_id:
+                relay_msg.msg_id = f"{NODE_ID}-{time.time_ns()}"
             relay_msg.signature = self.crypto.sign(relay_msg.canonical_bytes())
             with self._relay_pressure_lock:
                 self._relay_pending += 1
@@ -732,11 +744,15 @@ class MeshNode:
                 msg_type=    MsgType.MESH_RELAY,
                 sender_id=   NODE_ID,
                 sender_name= NODE_NAME,
-                payload=     {"inner_type": MsgType.TEXT, "inner_payload": {"text": text}},
+                payload=     {"inner_type": MsgType.TEXT, "inner_payload": {
+                    "text": text, "origin_id": NODE_ID, "origin_name": NODE_NAME,
+                }},
                 msg_id=      msg_id,
                 ttl=         MESH_TTL_DEFAULT,
                 relay_path=  [NODE_ID],
             )
+            if not relay_msg.msg_id:
+                relay_msg.msg_id = f"{NODE_ID}-{time.time_ns()}"
             relay_msg.signature = self.crypto.sign(relay_msg.canonical_bytes())
             self.msg_server.send_to_peer(peer.ip, peer.tcp_port, relay_msg, pid)
 
@@ -882,6 +898,10 @@ class MeshNode:
 
         msg = make_text_message(text, encrypted=encrypted,
                                 ciphertext_b64=ciphertext_b64)
+
+        # Ensure msg_id is set BEFORE signing (canonical_bytes includes msg_id)
+        if not msg.msg_id:
+            msg.msg_id = f"{msg.sender_id}-{time.time_ns()}"
 
         # Sign the message
         canonical = msg.canonical_bytes()
@@ -1125,6 +1145,9 @@ class MeshNode:
         msg = Message(msg_type=MsgType.CALL_ACCEPT, sender_id=NODE_ID,
                       sender_name=NODE_NAME, payload={})
         self.msg_server.send_to_peer(peer.ip, peer.tcp_port, msg, peer_id)
+        # Start media engine on callee side
+        self.media.start_call(peer.ip, peer.media_port)
+        self.current_call_peer = peer_id
         self._emit("call_accepted", {"peer_id": peer_id})
 
     def reject_call(self, peer_id: str):
@@ -1135,17 +1158,22 @@ class MeshNode:
                       sender_name=NODE_NAME, payload={})
         self.msg_server.send_to_peer(peer.ip, peer.tcp_port, msg, peer_id)
         self.current_call_peer = None
+        self._emit("call_rejected", {"peer_id": peer_id})
 
     def end_call(self):
-        if self.current_call_peer:
-            peer = self.discovery.get_peer(self.current_call_peer)
+        call_peer = self.current_call_peer
+        if call_peer:
+            peer = self.discovery.get_peer(call_peer)
             if peer:
                 msg = Message(msg_type=MsgType.CALL_END, sender_id=NODE_ID,
                               sender_name=NODE_NAME, payload={})
                 self.msg_server.send_to_peer(
-                    peer.ip, peer.tcp_port, msg, self.current_call_peer
+                    peer.ip, peer.tcp_port, msg, call_peer
                 )
         self.current_call_peer = None
+        self.media.end_call()
+        if call_peer:
+            self._emit("call_ended", {"peer_id": call_peer})
 
     def get_transfers(self) -> list:
         return self.file_mgr.get_transfers()
