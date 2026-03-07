@@ -1,0 +1,1185 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MeshLink — P2P Messenger</title>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.4/socket.io.min.js"></script>
+    <style>
+        :root {
+            --bg0:#0a0b0f;--bg1:#12141c;--bg2:#1a1d2a;--bg3:#222638;--bg4:#2a2f45;
+            --border:#262a3d;--border2:#363b55;
+            --t1:#e8eaf0;--t2:#8b90a5;--t3:#585d75;
+            --accent:#6c63ff;--accent2:#8b84ff;--accentg:#6c63ff40;
+            --green:#3dd68c;--greend:#3dd68c30;--red:#ff6b6b;--redd:#ff6b6b30;
+            --orange:#ffa94d;--cyan:#22d3ee;
+            --r:12px;--rs:8px;--tr:0.2s cubic-bezier(.4,0,.2,1);
+        }
+        *{margin:0;padding:0;box-sizing:border-box}
+        body{font-family:'Outfit',sans-serif;background:var(--bg0);color:var(--t1);height:100vh;overflow:hidden}
+        .app{display:grid;grid-template-columns:320px 1fr;height:100vh}
+
+        /* Sidebar */
+        .sidebar{background:var(--bg1);border-right:1px solid var(--border);display:flex;flex-direction:column;overflow:hidden}
+        .sidebar-header{padding:20px 20px 16px;border-bottom:1px solid var(--border)}
+        .logo{display:flex;align-items:center;gap:10px;margin-bottom:14px}
+        .logo-icon{width:36px;height:36px;background:linear-gradient(135deg,var(--accent),var(--cyan));border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:18px;font-weight:700;color:#fff;box-shadow:0 4px 20px var(--accentg)}
+        .logo h1{font-size:20px;font-weight:700;background:linear-gradient(135deg,var(--t1),var(--accent2));-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+        .node-info{display:flex;align-items:center;gap:8px;padding:8px 12px;background:var(--bg2);border-radius:var(--rs);font-size:12px;color:var(--t2);font-family:'JetBrains Mono',monospace}
+        .node-info .dot{width:8px;height:8px;background:var(--green);border-radius:50%;box-shadow:0 0 8px var(--green);animation:pulse 2s infinite}
+        @keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
+
+        .peers-section{flex:1;overflow-y:auto;padding:12px}
+        .section-label{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:1.5px;color:var(--t3);padding:8px 8px 12px}
+
+        /* Statistics panel */
+        .stats-panel{border-top:1px solid var(--border);padding:12px;background:var(--bg1);max-height:280px;overflow-y:auto}
+        .stats-title{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:1.5px;color:var(--t3);margin-bottom:8px}
+        .stats-grid{display:grid;grid-template-columns:1fr 1fr;gap:5px}
+        .stat-item{display:flex;justify-content:space-between;gap:4px;font-size:11px;color:var(--t2);background:var(--bg2);border:1px solid var(--border);border-radius:6px;padding:5px 8px}
+        .stat-item strong{color:var(--t1);font-family:'JetBrains Mono',monospace;font-weight:600;font-size:10px}
+
+        /* Events log */
+        .events-log{margin-top:8px;max-height:100px;overflow-y:auto;background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:6px}
+        .event-item{font-size:10px;color:var(--t3);line-height:1.4;margin-bottom:4px;font-family:'JetBrains Mono',monospace}
+
+        .peer-item{display:flex;align-items:center;gap:12px;padding:12px;border-radius:var(--r);cursor:pointer;transition:all var(--tr)}
+        .peer-item:hover{background:var(--bg3)}.peer-item.active{background:var(--bg4)}
+        .peer-avatar{width:42px;height:42px;border-radius:12px;display:flex;align-items:center;justify-content:center;font-weight:600;font-size:16px;color:#fff;flex-shrink:0;position:relative}
+        .peer-avatar .status-dot{position:absolute;bottom:-2px;right:-2px;width:12px;height:12px;background:var(--green);border:2.5px solid var(--bg1);border-radius:50%}
+        .peer-info{flex:1;min-width:0}
+        .peer-name{font-weight:500;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+        .peer-status-line{font-size:11px;color:var(--t3);display:flex;align-items:center;gap:4px}
+        .trust-badge{font-size:10px;padding:1px 5px;border-radius:4px;font-weight:600}
+        .trust-badge.trusted{background:var(--greend);color:var(--green)}
+        .trust-badge.untrusted{background:var(--redd);color:var(--red)}
+        .btn-add-peer{background:var(--accent);color:#fff;border:none;border-radius:6px;padding:6px 12px;font-size:11px;font-weight:600;cursor:pointer;margin-bottom:8px;transition:all var(--tr)}
+        .btn-add-peer:hover{background:var(--accent2)}
+
+        /* Add Peer Modal */
+        .modal{display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);backdrop-filter:blur(8px);z-index:1000;align-items:center;justify-content:center}
+        .modal.visible{display:flex}
+        .modal-content{background:var(--bg1);border:1px solid var(--border);border-radius:var(--r);padding:24px;max-width:400px;width:90%;box-shadow:0 20px 60px rgba(0,0,0,.5)}
+        .modal-header{margin-bottom:16px}
+        .modal-title{font-size:18px;font-weight:600}
+        .modal-body{display:flex;flex-direction:column;gap:12px}
+        .form-group{display:flex;flex-direction:column;gap:6px}
+        .form-label{font-size:13px;color:var(--t2)}
+        .form-input{background:var(--bg2);border:1px solid var(--border);border-radius:8px;color:var(--t1);padding:10px 12px;font-size:14px;outline:none}
+        .form-input:focus{border-color:var(--accent)}
+        .modal-actions{display:flex;gap:8px;margin-top:16px}
+        .btn-modal{background:var(--accent);color:#fff;border:none;border-radius:8px;padding:10px 16px;font-size:13px;font-weight:600;cursor:pointer;transition:all var(--tr)}
+        .btn-modal:hover{background:var(--accent2)}
+        .btn-modal.cancel{background:var(--bg3);color:var(--t2)}
+        .btn-modal.cancel:hover{background:var(--bg4);color:var(--t1)}
+        .no-peers{text-align:center;padding:40px 20px;color:var(--t3)}
+        .no-peers p{font-size:13px;line-height:1.6}
+
+        /* Chat */
+        .chat-area{display:flex;flex-direction:column;background:var(--bg0);overflow:hidden}
+        .chat-header{display:flex;align-items:center;justify-content:space-between;padding:16px 24px;border-bottom:1px solid var(--border);background:var(--bg1)}
+        .chat-header-info{display:flex;align-items:center;gap:12px}
+        .chat-header-name{font-weight:600;font-size:16px}
+        .chat-header-status{font-size:12px;color:var(--green)}
+        .chat-actions{display:flex;gap:4px}
+
+        .btn-icon{width:40px;height:40px;display:flex;align-items:center;justify-content:center;border:none;background:0 0;color:var(--t2);border-radius:var(--rs);cursor:pointer;transition:all var(--tr)}
+        .btn-icon:hover{background:var(--bg3);color:var(--t1)}
+
+        .messages-container{flex:1;overflow-y:auto;padding:20px 24px;display:flex;flex-direction:column;gap:6px;min-height:0}
+        .msg-bubble{max-width:65%;padding:10px 14px;border-radius:16px;font-size:14px;line-height:1.55;word-break:break-word;animation:msgIn .25s ease-out}
+        @keyframes msgIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+        .msg-them{align-self:flex-start;background:var(--bg2);border-bottom-left-radius:4px}
+        .msg-me{align-self:flex-end;background:var(--accent);color:#fff;border-bottom-right-radius:4px}
+        .msg-time{font-size:10px;color:var(--t3);margin-top:4px;padding:0 4px}
+        .msg-me .msg-time{color:rgba(255,255,255,.5);text-align:right}
+        .msg-sender{font-size:11px;font-weight:600;color:var(--accent2);margin-bottom:3px}
+        .msg-meta{display:flex;align-items:center;gap:6px;margin-top:4px;flex-wrap:wrap}
+
+        /* Lock icons */
+        .lock-icon{display:inline-flex;align-items:center;gap:3px;font-size:11px}
+        .lock-secure{color:#3dd68c}
+        .lock-partial{color:var(--orange)}
+        .lock-none{color:var(--t3)}
+        .msg-status{font-size:10px;opacity:.9}
+        .msg-status.failed{color:#ffd0d0}
+        .msg-status.sent{color:#e9e9ff}
+        .msg-status.delivered{color:#d2ffe8}
+
+        .msg-file{background:var(--bg2);border:1px solid var(--border);border-radius:var(--r);padding:10px 14px;font-size:13px;max-width:65%;align-self:flex-start}
+        .msg-file.msg-file-me{align-self:flex-end;border-color:var(--accent);background:var(--accent)10}
+        .msg-file a{color:var(--accent2);text-decoration:none}
+        .file-card{display:flex;align-items:center;gap:12px}
+        .file-icon{width:44px;height:44px;border-radius:10px;background:var(--bg3);display:flex;align-items:center;justify-content:center;flex-shrink:0;font-size:20px}
+        .file-card-info{flex:1;min-width:0}
+        .file-card-name{font-size:13px;font-weight:500;color:var(--t1);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+        .file-card-meta{font-size:11px;color:var(--t3);margin-top:2px}
+        .file-dl-btn{width:38px;height:38px;border-radius:10px;background:var(--accent);border:none;display:flex;align-items:center;justify-content:center;cursor:pointer;transition:all var(--tr);flex-shrink:0;color:#fff}
+        .file-dl-btn:hover{background:var(--accent2);transform:scale(1.08)}
+        .file-sent-icon{width:38px;height:38px;border-radius:10px;background:var(--green)20;display:flex;align-items:center;justify-content:center;flex-shrink:0;color:var(--green)}
+
+        .typing-indicator{font-size:12px;color:var(--t3);padding:4px 8px;display:none;align-items:center;gap:6px}
+        .typing-indicator.visible{display:flex}
+        .typing-dots span{display:inline-block;width:5px;height:5px;background:var(--t3);border-radius:50%;animation:td 1.4s infinite}
+        .typing-dots span:nth-child(2){animation-delay:.2s}.typing-dots span:nth-child(3){animation-delay:.4s}
+        @keyframes td{0%,60%,100%{transform:translateY(0)}30%{transform:translateY(-4px)}}
+
+        /* Seed pairing banner */
+        .pair-banner{background:var(--bg2);border:1px solid var(--orange);border-radius:var(--r);padding:14px 18px;margin:16px 24px;display:none}
+        .pair-banner.visible{display:block}
+        .pair-banner h3{font-size:14px;color:var(--orange);margin-bottom:8px}
+        .pair-banner p{font-size:12px;color:var(--t2);margin-bottom:10px}
+        .pair-row{display:flex;gap:8px;align-items:center}
+        .pair-input{background:var(--bg3);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-family:'JetBrains Mono',monospace;font-size:16px;padding:8px 12px;text-transform:uppercase;letter-spacing:4px;width:140px;text-align:center;outline:none}
+        .pair-input:focus{border-color:var(--accent)}
+        .btn-pair{background:var(--orange);color:#000;border:none;border-radius:8px;padding:8px 16px;font-weight:600;font-size:13px;cursor:pointer;transition:all var(--tr)}
+        .btn-pair:hover{opacity:.9;transform:scale(1.02)}
+        .btn-gen{background:var(--bg3);color:var(--t2);border:1px solid var(--border);border-radius:8px;padding:8px 12px;font-size:12px;cursor:pointer;transition:all var(--tr)}
+        .btn-gen:hover{background:var(--bg4);color:var(--t1)}
+        .seed-display{font-family:'JetBrains Mono',monospace;font-size:20px;letter-spacing:6px;color:var(--accent2);margin-top:8px}
+
+        .input-area{padding:16px 24px;border-top:1px solid var(--border);background:var(--bg1)}
+        .input-row{display:flex;align-items:flex-end;gap:10px}
+        .input-wrapper{flex:1;background:var(--bg2);border:1px solid var(--border);border-radius:var(--r);display:flex;align-items:flex-end;transition:border-color var(--tr)}
+        .input-wrapper:focus-within{border-color:var(--accent)}
+        #msg-input{flex:1;background:0 0;border:none;outline:none;color:var(--t1);font-family:'Outfit',sans-serif;font-size:14px;padding:12px 16px;resize:none;max-height:120px;line-height:1.5}
+        #msg-input::placeholder{color:var(--t3)}
+        .btn-attach{padding:10px;background:0 0;border:none;color:var(--t3);cursor:pointer;transition:color var(--tr)}.btn-attach:hover{color:var(--t1)}
+        .btn-send{width:44px;height:44px;display:flex;align-items:center;justify-content:center;background:var(--accent);border:none;border-radius:var(--r);color:#fff;cursor:pointer;transition:all var(--tr);flex-shrink:0}
+        .btn-send:hover{background:var(--accent2);transform:scale(1.05)}.btn-send:disabled{opacity:.3;cursor:default;transform:none}
+
+        .welcome{flex:1;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:20px;color:var(--t3)}
+        .welcome-icon{width:80px;height:80px;background:var(--bg2);border-radius:24px;display:flex;align-items:center;justify-content:center;font-size:36px}
+        .welcome h2{font-size:22px;color:var(--t2);font-weight:500}
+        .welcome p{font-size:14px;max-width:360px;text-align:center;line-height:1.6}
+
+        /* Call overlay */
+        .call-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.92);backdrop-filter:blur(24px);z-index:1000;flex-direction:column;align-items:center;justify-content:center;gap:24px}
+        .call-overlay.visible{display:flex}
+        .call-videos{position:relative;width:100%;max-width:800px;aspect-ratio:16/9;background:#000;border-radius:16px;overflow:hidden}
+        .call-videos video{width:100%;height:100%;object-fit:cover}
+        #remote-video{width:100%;height:100%;background:#111}
+        #local-video{position:absolute;bottom:16px;right:16px;width:180px;height:135px;border-radius:12px;border:2px solid rgba(255,255,255,.2);object-fit:cover;z-index:2;background:#222}
+        .call-audio-only{display:none;flex-direction:column;align-items:center;gap:20px}
+        .call-avatar-big{width:100px;height:100px;border-radius:30px;display:flex;align-items:center;justify-content:center;font-size:42px;font-weight:700;color:#fff;animation:cp 2s infinite}
+        @keyframes cp{0%,100%{box-shadow:0 0 0 0 var(--accentg)}50%{box-shadow:0 0 0 30px transparent}}
+        .call-name{font-size:24px;font-weight:600}
+        .call-status{font-size:14px;color:var(--t2)}
+        .call-timer{font-family:'JetBrains Mono',monospace;font-size:18px;color:var(--t2)}
+        .call-controls{display:flex;gap:12px;margin-top:16px}
+        .call-metrics{display:grid;grid-template-columns:repeat(4,minmax(100px,1fr));gap:8px;width:min(540px,92vw)}
+        .metric-card{background:var(--bg1);border:1px solid var(--border);border-radius:10px;padding:8px 10px;text-align:center}
+        .metric-label{font-size:10px;color:var(--t3);text-transform:uppercase;letter-spacing:.8px}
+        .metric-value{font-size:14px;color:var(--t1);font-family:'JetBrains Mono',monospace;margin-top:4px}
+        .btn-call{width:56px;height:56px;border-radius:50%;display:flex;align-items:center;justify-content:center;border:none;cursor:pointer;transition:all var(--tr);color:#fff}
+        .btn-call:hover{transform:scale(1.1)}
+        .btn-call-end{background:var(--red)}.btn-call-accept{background:var(--green)}
+        .btn-call-mute{background:var(--bg3)}.btn-call-mute.active{background:var(--red)}
+        .btn-call-vid{background:var(--bg3)}.btn-call-vid.active{background:var(--red)}
+        .ringing-ui{display:flex;flex-direction:column;align-items:center;gap:20px}
+
+        /* Toasts */
+        .toasts{position:fixed;bottom:24px;right:24px;display:flex;flex-direction:column;gap:8px;z-index:900;max-width:340px}
+        .toast{background:var(--bg1);border:1px solid var(--border);border-radius:var(--r);padding:14px 18px;box-shadow:0 8px 32px rgba(0,0,0,.4);animation:slideIn .3s ease-out}
+        @keyframes slideIn{from{opacity:0;transform:translateX(40px)}to{opacity:1;transform:translateX(0)}}
+        .toast-header{font-size:13px;font-weight:600;margin-bottom:8px}
+        .toast-progress{height:4px;background:var(--bg3);border-radius:2px;overflow:hidden}
+        .toast-bar{height:100%;background:var(--accent);border-radius:2px;transition:width .3s}
+        .toast-info{font-size:11px;color:var(--t3);margin-top:6px}
+
+        ::-webkit-scrollbar{width:6px}::-webkit-scrollbar-track{background:0 0}::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}
+        @media(max-width:768px){.app{grid-template-columns:1fr}.sidebar{display:none}}
+    </style>
+</head>
+<body>
+<div class="app">
+    <!-- Sidebar -->
+    <div class="sidebar">
+        <div class="sidebar-header">
+            <div class="logo"><div class="logo-icon">M</div><h1>MeshLink</h1></div>
+            <div class="node-info"><span class="dot"></span><span id="node-label">Connecting...</span></div>
+        </div>
+        <div class="peers-section">
+            <div class="section-label">Peers on network</div>
+            <button class="btn-add-peer" onclick="showAddPeerModal()">+ Add Peer</button>
+            <div id="peers-list">
+                <div class="no-peers"><p>Scanning for peers on your network...</p></div>
+            </div>
+        </div>
+        <div class="stats-panel">
+            <div class="stats-title">Statistics</div>
+            <div class="stats-grid" id="stats-grid"></div>
+            <div class="events-log" id="events-log"></div>
+        </div>
+    </div>
+
+    <!-- Chat -->
+    <div class="chat-area">
+        <div class="welcome" id="welcome-screen">
+            <div class="welcome-icon">🔗</div>
+            <h2>Welcome to MeshLink</h2>
+            <p>Select a peer to start a secure P2P conversation. All communication requires seed-pairing first.</p>
+        </div>
+        <div id="chat-view" style="display:none;flex-direction:column;flex:1;overflow:hidden;min-height:0">
+            <div class="chat-header">
+                <div class="chat-header-info">
+                    <div class="peer-avatar" id="chat-avatar" style="width:36px;height:36px;border-radius:10px;font-size:14px">?</div>
+                    <div>
+                        <div class="chat-header-name" id="chat-peer-name">—</div>
+                        <div class="chat-header-status" id="chat-peer-status">online</div>
+                    </div>
+                </div>
+                <div class="chat-actions">
+                    <button class="btn-icon" onclick="initiateCall('audio')" title="Voice call">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6A19.79 19.79 0 0 1 2.12 4.11 2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.127.96.361 1.903.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0 1 22 16.92z"/></svg>
+                    </button>
+                    <button class="btn-icon" onclick="initiateCall('video')" title="Video call">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>
+                    </button>
+                </div>
+            </div>
+            <!-- Seed pairing banner -->
+            <div class="pair-banner" id="pair-banner">
+                <h3>🔐 Seed Pairing Required</h3>
+                <p>You must pair with this peer before exchanging messages. Share the 6-character code out-of-band (verbally, etc.) and both enter it.</p>
+                <div class="pair-row">
+                    <input type="text" class="pair-input" id="seed-input" maxlength="6" placeholder="ABC123" autocomplete="off">
+                    <button class="btn-pair" onclick="doPair()">Pair</button>
+                    <button class="btn-gen" onclick="generateSeed()">Generate Code</button>
+                </div>
+                <div class="seed-display" id="seed-display"></div>
+            </div>
+            <div class="messages-container" id="messages"></div>
+            <div class="typing-indicator" id="typing-ind">
+                <div class="typing-dots"><span></span><span></span><span></span></div>
+                <span id="typing-name">Someone</span> is typing...
+            </div>
+            <div class="input-area">
+                <div class="input-row">
+                    <div class="input-wrapper">
+                        <button class="btn-attach" onclick="document.getElementById('file-input').click()" title="Send file">
+                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+                        </button>
+                        <textarea id="msg-input" placeholder="Type a message..." rows="1" onkeydown="handleKey(event)" oninput="handleTyping()"></textarea>
+                    </div>
+                    <button class="btn-send" id="btn-send" onclick="sendMessage()" disabled>
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Call overlay -->
+<div class="call-overlay" id="call-overlay">
+    <div class="ringing-ui" id="ringing-ui">
+        <div class="call-avatar-big" id="call-avatar-ring" style="background:var(--accent)">?</div>
+        <div class="call-name" id="call-name-ring">Unknown</div>
+        <div class="call-status" id="call-status-ring">Calling...</div>
+        <div class="call-controls">
+            <button class="btn-call btn-call-end" onclick="hangUp()" title="Decline">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" transform="rotate(135)"><path d="M22 16.92v3a2 2 0 0 1-2.18 2A19.79 19.79 0 0 1 11.19 18.86a19.5 19.5 0 0 1-6-6A19.79 19.79 0 0 1 2.12 4.11 2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.127.96.361 1.903.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0 1 22 16.92z"/></svg>
+            </button>
+            <button class="btn-call btn-call-accept" id="btn-accept" onclick="acceptIncoming()" title="Accept" style="display:none">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 16.92v3a2 2 0 0 1-2.18 2A19.79 19.79 0 0 1 11.19 18.86a19.5 19.5 0 0 1-6-6A19.79 19.79 0 0 1 2.12 4.11 2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.127.96.361 1.903.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0 1 22 16.92z"/></svg>
+            </button>
+        </div>
+    </div>
+    <div id="active-call-ui" style="display:none;width:100%;flex-direction:column;align-items:center;gap:20px">
+        <div class="call-videos" id="call-videos" style="display:none">
+            <video id="remote-video" autoplay playsinline></video>
+            <video id="local-video" autoplay playsinline muted></video>
+        </div>
+        <div class="call-audio-only" id="call-audio-only">
+            <div class="call-avatar-big" id="call-avatar-active" style="background:var(--accent)">?</div>
+            <div class="call-name" id="call-name-active">Unknown</div>
+        </div>
+        <div class="call-timer" id="call-timer">00:00</div>
+        <div class="call-metrics" id="call-metrics">
+            <div class="metric-card"><div class="metric-label">Latency</div><div class="metric-value" id="m-latency">— ms</div></div>
+            <div class="metric-card"><div class="metric-label">Loss</div><div class="metric-value" id="m-loss">— %</div></div>
+            <div class="metric-card"><div class="metric-label">Jitter</div><div class="metric-value" id="m-jitter">— ms</div></div>
+            <div class="metric-card"><div class="metric-label">Bitrate</div><div class="metric-value" id="m-bitrate">— kbps</div></div>
+        </div>
+        <div class="call-controls">
+            <button class="btn-call btn-call-mute" id="btn-mute" onclick="toggleMute()" title="Mute">
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
+            </button>
+            <button class="btn-call btn-call-end" onclick="hangUp()" title="End call">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" transform="rotate(135)"><path d="M22 16.92v3a2 2 0 0 1-2.18 2A19.79 19.79 0 0 1 11.19 18.86a19.5 19.5 0 0 1-6-6A19.79 19.79 0 0 1 2.12 4.11 2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.127.96.361 1.903.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0 1 22 16.92z"/></svg>
+            </button>
+            <button class="btn-call btn-call-vid" id="btn-vidtoggle" onclick="toggleVideo()" title="Toggle video">
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>
+            </button>
+        </div>
+    </div>
+    <audio id="remote-audio" autoplay></audio>
+</div>
+
+<!-- Add Peer Modal -->
+<div class="modal" id="add-peer-modal">
+    <div class="modal-content">
+        <div class="modal-header">
+            <div class="modal-title">Add Peer Manually</div>
+        </div>
+        <div class="modal-body">
+            <div class="form-group">
+                <label class="form-label">IP Address</label>
+                <input type="text" class="form-input" id="peer-ip" placeholder="192.168.1.100">
+            </div>
+            <div class="form-group">
+                <label class="form-label">TCP Port</label>
+                <input type="number" class="form-input" id="peer-port" placeholder="5151" value="5151">
+            </div>
+            <div class="form-group">
+                <label class="form-label">Name (optional)</label>
+                <input type="text" class="form-input" id="peer-name" placeholder="Peer Name">
+            </div>
+        </div>
+        <div class="modal-actions">
+            <button class="btn-modal cancel" onclick="hideAddPeerModal()">Cancel</button>
+            <button class="btn-modal" onclick="addPeer()">Add Peer</button>
+        </div>
+    </div>
+</div>
+
+<div class="toasts" id="toasts"></div>
+<input type="file" id="file-input" style="display:none" onchange="handleFileSelect(event)">
+
+<script>
+// ═══════════════════════════════════════════════
+//  STATE
+// ═══════════════════════════════════════════════
+const S = {
+    nodeId:'', nodeName:'', peers:[], activePeer:null,
+    messages:{}, unread:{}, trustedPeers:new Set(),
+    callPeer:null, callType:null, callDir:null,
+    callTimer:null, callSec:0, callActive:false,
+    muted:false, videoOff:false,
+    stats:{}, securityEvents:[],
+    // Track pending (optimistic) messages
+    _pendingMsgId: null,
+    // Prevent periodic peers_list refresh from constantly re-selecting active chat
+    // and snapping scroll to bottom.
+    _restoredOnLoad: false,
+    // WebRTC: ICE candidates can arrive before pc exists or before remoteDescription.
+    _pendingIce: [],
+};
+let pc = null;
+let localStream = null;
+let _rtcStatsInterval = null;
+
+const COLORS = ['#6c63ff','#3dd68c','#ffa94d','#22d3ee','#ff6b6b','#a78bfa','#f472b6','#34d399'];
+function pColor(id){let h=0;for(let i=0;i<id.length;i++)h=id.charCodeAt(i)+((h<<5)-h);return COLORS[Math.abs(h)%COLORS.length]}
+function pInit(n){return(n||'?')[0].toUpperCase()}
+function fmtTime(ts){return new Date(ts*1000).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})}
+function fmtTs(ts){return new Date(ts*1000).toLocaleString()}
+function fmtBytes(b){if(b<1024)return b+' B';if(b<1048576)return(b/1024).toFixed(1)+' KB';if(b<1073741824)return(b/1048576).toFixed(1)+' MB';return(b/1073741824).toFixed(2)+' GB'}
+function escHtml(t){const d=document.createElement('div');d.textContent=t;return d.innerHTML}
+
+const ACTIVE_PEER_KEY = 'meshlink.activePeer';
+function seedInputKey(peerId){ return `meshlink.seedInput.${peerId}`; }
+function seedDisplayKey(peerId){ return `meshlink.seedDisplay.${peerId}`; }
+function persistActivePeer(peerId){
+    try {
+        if(peerId) localStorage.setItem(ACTIVE_PEER_KEY, peerId);
+        else localStorage.removeItem(ACTIVE_PEER_KEY);
+    } catch(_) {}
+}
+function getPersistedActivePeer(){
+    try { return localStorage.getItem(ACTIVE_PEER_KEY) || null; }
+    catch(_) { return null; }
+}
+function persistSeedInput(peerId, value){
+    if(!peerId) return;
+    try { localStorage.setItem(seedInputKey(peerId), value || ''); } catch(_) {}
+}
+function persistSeedDisplay(peerId, value){
+    if(!peerId) return;
+    try { localStorage.setItem(seedDisplayKey(peerId), value || ''); } catch(_) {}
+}
+function restoreSeedUi(peerId){
+    const input = document.getElementById('seed-input');
+    const display = document.getElementById('seed-display');
+    if(!input || !display) return;
+    if(!peerId){
+        input.value = '';
+        display.textContent = '';
+        return;
+    }
+    try {
+        input.value = localStorage.getItem(seedInputKey(peerId)) || '';
+        display.textContent = localStorage.getItem(seedDisplayKey(peerId)) || '';
+    } catch(_) {
+        input.value = '';
+        display.textContent = '';
+    }
+}
+
+// SVG lock icons
+const LOCK_SECURE = '<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zm-6 9c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zM9 8V6c0-1.66 1.34-3 3-3s3 1.34 3 3v2H9z"/></svg>';
+const LOCK_OPEN = '<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6h2c0-1.66 1.34-3 3-3s3 1.34 3 3v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zm0 12H6V10h12v10zm-6-3c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2z"/></svg>';
+
+// ═══════════════════════════════════════════════
+//  SOCKET.IO
+// ═══════════════════════════════════════════════
+const socket = io();
+
+socket.on('node_info', i => {
+    S.nodeId=i.node_id; S.nodeName=i.node_name;
+    document.getElementById('node-label').textContent = i.node_name;
+});
+
+socket.on('peers_list', p => {
+    S.peers=p;
+    // Update trusted status from peers
+    p.forEach(peer => {
+        if(peer.trusted) S.trustedPeers.add(peer.peer_id);
+    });
+
+    // Restore last selected peer after page refresh only for trusted peers.
+    // For untrusted peers keep welcome screen, otherwise banner+chat mismatch appears.
+    if(!S.activePeer){
+        const savedPeer = getPersistedActivePeer();
+        if(savedPeer && p.some(peer => peer.peer_id === savedPeer && (peer.trusted || S.trustedPeers.has(peer.peer_id)))){
+            S.activePeer = savedPeer;
+        }
+    }
+
+    renderPeers();
+    updatePairBanner();
+
+    // Auto-open chat only once right after page load.
+    if(!S._restoredOnLoad && S.activePeer && p.some(peer => peer.peer_id === S.activePeer)){
+        S._restoredOnLoad = true;
+        selectPeer(S.activePeer);
+    }
+});
+
+socket.on('peer_joined', p => {
+    const i=S.peers.findIndex(x=>x.peer_id===p.peer_id);
+    if(i>=0)S.peers[i]=p; else S.peers.push(p);
+    if(p.trusted) S.trustedPeers.add(p.peer_id);
+    renderPeers(); toast(`${p.name} joined`);
+    updatePairBanner();
+});
+
+socket.on('peer_left', p => {
+    S.peers=S.peers.filter(x=>x.peer_id!==p.peer_id);
+    if(S.activePeer===p.peer_id){
+        S.activePeer = null;
+        persistActivePeer(null);
+        restoreSeedUi(null);
+    }
+    renderPeers(); toast(`${p.name} offline`);
+});
+
+// Incoming message from other peer
+socket.on('message', m => {
+    // Most messages are grouped by sender_id (remote peer). For local outgoing file
+    // messages server includes explicit peer_id to route into the correct chat.
+    const pid = (m && m.peer_id) ? m.peer_id : m.sender_id;
+    if(!S.messages[pid]) S.messages[pid]=[];
+    // Dedup check
+    if(!S.messages[pid].find(x => x.msg_id === m.msg_id)) {
+        S.messages[pid].push(m);
+    }
+    if(S.activePeer===pid){renderMsgs(pid);scrollBotIfNear();}
+    else{S.unread[pid]=(S.unread[pid]||0)+1;renderPeers();}
+});
+
+// Our sent message confirmed by server
+socket.on('message_sent', m => {
+    if(!m || !m.msg_id) return;
+    const pid = S.activePeer;
+    if(!pid) return;
+    if(!S.messages[pid]) S.messages[pid]=[];
+    const arr = S.messages[pid];
+
+    // Replace pending optimistic message
+    if(S._pendingMsgId) {
+        const pendIdx = arr.findIndex(x => x.msg_id === S._pendingMsgId);
+        if(pendIdx >= 0) {
+            arr[pendIdx] = m;
+            S._pendingMsgId = null;
+            renderMsgs(pid); scrollBot();
+            return;
+        }
+    }
+
+    // Otherwise dedup by msg_id
+    const existing = arr.findIndex(x => x.msg_id === m.msg_id);
+    if(existing >= 0) {
+        arr[existing] = {...arr[existing], ...m};
+    } else {
+        arr.push(m);
+    }
+    S._pendingMsgId = null;
+    renderMsgs(pid); scrollBot();
+});
+
+socket.on('message_status', d => {
+    const pid=d.peer_id;
+    if(!pid || !d.msg_id)return;
+    const arr=S.messages[pid]||[];
+    const msg=arr.find(x=>x.msg_id===d.msg_id);
+    if(msg){ msg.status=d.status; if(S.activePeer===pid) renderMsgs(pid, true); }
+});
+
+socket.on('typing', d => { if(d.peer_id===S.activePeer) showTyping(d.peer_name); });
+socket.on('chat_history', d => { S.messages[d.peer_id]=d.messages; if(S.activePeer===d.peer_id){renderMsgs(d.peer_id);scrollBot();} });
+
+socket.on('statistics', d => { if(d) { S.stats=d; renderStats(); } });
+socket.on('security_event', e => {
+    if(!e)return;
+    S.securityEvents.push(e);
+    if(S.securityEvents.length>100) S.securityEvents=S.securityEvents.slice(-100);
+    renderStats();
+});
+
+socket.on('seed_paired', d => {
+    if(d && d.peer_id) {
+        toast(`Peer ${d.peer_name || d.peer_id} has paired with you`);
+    }
+});
+socket.on('seed_pair_result', d => {
+    if(d && d.ok) {
+        S.trustedPeers.add(d.peer_id);
+        renderPeers();
+        updatePairBanner();
+        toast('Pairing successful!');
+    } else {
+        if(d.reason === 'own_seed') {
+            toast('Cannot enter your own seed code — share it with the other peer');
+        } else {
+            toast('Pairing failed — check the code');
+        }
+    }
+});
+
+// File transfer
+socket.on('file_progress', updateXfer);
+socket.on('file_complete', completeXfer);
+
+// Call signaling
+socket.on('call_incoming', d => {
+    S.callPeer=d.peer_id; S.callType=d.call_type; S.callDir='incoming';
+    showRinging(d.peer_name, d.call_type, true);
+});
+socket.on('call_outgoing', d => { showRinging(d.peer_name, d.call_type, false); });
+socket.on('call_accepted', d => { if(S.callDir==='outgoing') startWebRTC(true); });
+socket.on('call_rejected', () => { cleanupCall(); hideCall(); toast('Call declined'); });
+socket.on('call_ended', () => { cleanupCall(); hideCall(); toast('Call ended'); });
+
+// WebRTC signaling
+socket.on('webrtc_offer', async d => {
+    S.callPeer=d.peer_id;
+    // Ensure callee uses correct media constraints (video vs audio).
+    if(d && d.call_type) S.callType = d.call_type;
+    await startWebRTC(false);
+    await pc.setRemoteDescription(new RTCSessionDescription(d.sdp));
+    flushPendingIce();
+    const answer = await pc.createAnswer();
+    await pc.setLocalDescription(answer);
+    socket.emit('webrtc_answer',{peer_id:d.peer_id, sdp:answer});
+});
+socket.on('webrtc_answer', async d => {
+    if(!pc) return;
+    await pc.setRemoteDescription(new RTCSessionDescription(d.sdp));
+    // Key for caller side: ICE can arrive before remoteDescription; flush after answer.
+    flushPendingIce();
+});
+socket.on('webrtc_ice', async d => {
+    if(!d || !d.candidate) return;
+    if(pc && pc.remoteDescription){
+        try{await pc.addIceCandidate(new RTCIceCandidate(d.candidate));}catch(e){}
+    } else {
+        // Candidate can arrive before pc is created or before setRemoteDescription.
+        if(!Array.isArray(S._pendingIce)) S._pendingIce = [];
+        S._pendingIce.push(d.candidate);
+    }
+});
+
+setInterval(()=>socket.emit('get_peers'),5000);
+socket.on('connect', () => { socket.emit('get_peers'); });
+
+// Fetch initial stats
+fetch('/api/statistics').then(r=>r.json()).then(d=>{S.stats=d;renderStats();}).catch(()=>{});
+
+// ═══════════════════════════════════════════════
+//  RENDERING
+// ═══════════════════════════════════════════════
+function renderPeers(){
+    const el=document.getElementById('peers-list');
+    if(!S.peers.length){el.innerHTML='<div class="no-peers"><p>Scanning for peers on your network...</p></div>';return;}
+    el.innerHTML=S.peers.map(p=>{
+        const a=S.activePeer===p.peer_id?' active':'';
+        const u=S.unread[p.peer_id]||0;
+        const trusted = p.trusted || S.trustedPeers.has(p.peer_id);
+        const trustHtml = trusted
+            ? '<span class="trust-badge trusted">✓ Paired</span>'
+            : '<span class="trust-badge untrusted">⚠ Unpaired</span>';
+        return `<div class="peer-item${a}" onclick="selectPeer('${p.peer_id}')">
+            <div class="peer-avatar" style="background:${pColor(p.peer_id)}">${pInit(p.name)}<div class="status-dot"></div></div>
+            <div class="peer-info">
+                <div class="peer-name">${escHtml(p.name)}</div>
+                <div class="peer-status-line">${trustHtml}</div>
+            </div>
+            ${u?`<div class="peer-unread">${u}</div>`:''}
+        </div>`;
+    }).join('');
+}
+
+function selectPeer(pid){
+    S.activePeer=pid; S.unread[pid]=0; renderPeers();
+    persistActivePeer(pid);
+    const p=S.peers.find(x=>x.peer_id===pid); if(!p)return;
+    document.getElementById('welcome-screen').style.display='none';
+    document.getElementById('chat-view').style.display='flex';
+    document.getElementById('chat-avatar').style.background=pColor(pid);
+    document.getElementById('chat-avatar').textContent=pInit(p.name);
+    document.getElementById('chat-peer-name').textContent=p.name;
+    const trusted = p.trusted || S.trustedPeers.has(pid);
+    document.getElementById('chat-peer-status').textContent = trusted ? 'online · paired' : 'online';
+    restoreSeedUi(pid);
+    socket.emit('get_chat',{peer_id:pid});
+    renderMsgs(pid);scrollBot();
+    updatePairBanner();
+}
+
+function updatePairBanner(){
+    const banner = document.getElementById('pair-banner');
+    if(!S.activePeer){banner.classList.remove('visible');return;}
+    banner.classList.toggle('visible', !S.trustedPeers.has(S.activePeer));
+    btnSend.disabled = !msgInput.value.trim() || !S.trustedPeers.has(S.activePeer);
+}
+
+function renderMsgs(pid, keepScroll=false){
+    const c=document.getElementById('messages');
+    const savedTop = keepScroll ? c.scrollTop : null;
+    c.innerHTML='';
+    (S.messages[pid]||[]).forEach(m=>appendMsg(m,false));
+    if(savedTop !== null) c.scrollTop = savedTop;
+}
+
+function appendMsg(m,anim=true){
+    const c=document.getElementById('messages');
+    const me=m.is_me||m.sender_id===S.nodeId;
+    const div=document.createElement('div');
+
+    if(m.msg_type==='file'){
+        div.className=`msg-file${me?' msg-file-me':''}`;
+        if(!anim)div.style.animation='none';
+        const fname = m.file_name || m.text || 'file';
+        const fsize = m.file_size ? fmtBytes(m.file_size) : '';
+        const ext = fname.split('.').pop().toUpperCase();
+        const extIcons = {'PDF':'📄','DOC':'📝','DOCX':'📝','TXT':'📝','JPG':'🖼','JPEG':'🖼','PNG':'🖼','GIF':'🖼','MP3':'🎵','MP4':'🎬','ZIP':'📦','RAR':'📦','PY':'🐍','JS':'⚡'};
+        const icon = extIcons[ext] || '📎';
+        let actionHtml = '';
+        if(!me && m.file_url){
+            actionHtml = `<a href="${escHtml(m.file_url)}" download="${escHtml(fname)}" class="file-dl-btn" title="Download"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg></a>`;
+        } else if(me){
+            actionHtml = `<div class="file-sent-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg></div>`;
+        }
+        div.innerHTML = `<div class="file-card"><div class="file-icon">${icon}</div><div class="file-card-info"><div class="file-card-name">${escHtml(fname)}</div><div class="file-card-meta">${ext}${fsize ? ' · '+fsize : ''} · ${fmtTime(m.timestamp)}</div></div>${actionHtml}</div>`;
+    } else {
+        div.className=`msg-bubble ${me?'msg-me':'msg-them'}`;
+        if(!anim)div.style.animation='none';
+        let h='';
+        if(!me)h+=`<div class="msg-sender">${escHtml(m.sender_name)}</div>`;
+        h+=`<div>${escHtml(m.text)}</div>`;
+
+        // Lock icon based on security level
+        const sec = m.security || 'none';
+        let lockHtml = '';
+        if(sec === 'secure'){
+            lockHtml = `<span class="lock-icon lock-secure">${LOCK_SECURE}</span>`;
+        } else if(sec === 'partial'){
+            lockHtml = `<span class="lock-icon lock-partial">${LOCK_OPEN}</span>`;
+        } else {
+            lockHtml = `<span class="lock-icon lock-none">${LOCK_OPEN}</span>`;
+        }
+
+        // Pending indicator
+        const isPending = m.msg_id && m.msg_id.startsWith('_pending_');
+        const statusTxt = me && !isPending && m.status ? `<span class="msg-status ${escHtml(m.status)}">${escHtml(m.status)}</span>` : '';
+        const pendingTxt = isPending ? '<span class="msg-status sent">sending...</span>' : '';
+        h+=`<div class="msg-meta">${lockHtml}<span class="msg-time">${fmtTime(m.timestamp)}</span>${statusTxt}${pendingTxt}</div>`;
+        div.innerHTML=h;
+    }
+    c.appendChild(div);
+}
+
+function renderStats(){
+    const s = S.stats || {};
+    const grid = document.getElementById('stats-grid');
+    if(!grid) return;
+    const r = (k,v) => `<div class="stat-item"><span>${escHtml(k)}</span><strong>${escHtml(String(v))}</strong></div>`;
+    grid.innerHTML = [
+        r('Peers', s.active_peers||0),
+        r('Sessions', s.sessions_active||0),
+        r('Sent', s.messages_sent||0),
+        r('Received', s.messages_received||0),
+        r('Encrypted', s.messages_encrypted||0),
+        r('Delivery fails', s.delivery_failures||0),
+        r('Avg latency', (s.avg_delivery_latency_ms||0)+'ms'),
+        r('Retries', s.delivery_retries||0),
+        r('Outbox', s.outbox_pending||0),
+        r('Relay queue', s.relay_pending||0),
+        r('Relay drops', s.relay_drops||0),
+        r('Policy blocks', s.policy_drops||0),
+        r('Security events', s.security_events||0),
+        r('Blacklisted', s.blacklist_count||0),
+        r('File sends', `${s.active_file_sends||0}/${s.file_send_slots||0}`),
+        r('Uptime', Math.round((s.uptime_seconds||0)/60)+'m'),
+    ].join('');
+
+    // Events log
+    const logEl = document.getElementById('events-log');
+    if(logEl){
+        const events = S.securityEvents.slice(-10).reverse();
+        logEl.innerHTML = events.length
+            ? events.map(e=>`<div class="event-item">${escHtml(e.event||'event')} · ${escHtml(e.peer_id||'system').substring(0,8)} · ${fmtTs(e.ts)}</div>`).join('')
+            : '<div class="event-item">No events yet</div>';
+    }
+}
+
+function scrollBot(){const c=document.getElementById('messages');requestAnimationFrame(()=>c.scrollTop=c.scrollHeight);}
+function isNearBottom(){const c=document.getElementById('messages');return c.scrollHeight-c.scrollTop-c.clientHeight<120;}
+function scrollBotIfNear(){if(isNearBottom())scrollBot();}
+
+// ═══════════════════════════════════════════════
+//  INPUT
+// ═══════════════════════════════════════════════
+const msgInput=document.getElementById('msg-input');
+const btnSend=document.getElementById('btn-send');
+msgInput.addEventListener('input',()=>{
+    btnSend.disabled = !msgInput.value.trim() || !S.trustedPeers.has(S.activePeer);
+    msgInput.style.height='auto';
+    msgInput.style.height=Math.min(msgInput.scrollHeight,120)+'px';
+});
+function handleKey(e){if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();sendMessage();}}
+let typTO=null;
+function handleTyping(){
+    if(!S.activePeer)return;
+    if(!typTO)socket.emit('typing',{peer_id:S.activePeer});
+    clearTimeout(typTO);typTO=setTimeout(()=>typTO=null,2000);
+}
+
+function sendMessage(){
+    const t=msgInput.value.trim();if(!t||!S.activePeer)return;
+
+    // Create optimistic local message with pending ID
+    const pendingId = '_pending_' + Date.now();
+    S._pendingMsgId = pendingId;
+
+    const m={msg_id:pendingId,sender_id:S.nodeId,sender_name:S.nodeName,
+        text:t,timestamp:Date.now()/1000,is_me:true,msg_type:'text',security:'none',status:''};
+    if(!S.messages[S.activePeer])S.messages[S.activePeer]=[];
+    S.messages[S.activePeer].push(m);
+    appendMsg(m);scrollBot();
+
+    socket.emit('send_message',{peer_id:S.activePeer,text:t});
+    msgInput.value='';msgInput.style.height='auto';btnSend.disabled=true;
+}
+
+let typHide=null;
+function showTyping(name){
+    const el=document.getElementById('typing-ind');
+    document.getElementById('typing-name').textContent=name;
+    el.classList.add('visible');
+    clearTimeout(typHide);typHide=setTimeout(()=>el.classList.remove('visible'),3000);
+}
+
+// ═══════════════════════════════════════════════
+//  SEED PAIRING
+// ═══════════════════════════════════════════════
+function generateSeed(){
+    if(!S.activePeer){ toast('Select a peer first'); return; }
+    fetch('/api/seed/generate',{method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({peer_id:S.activePeer})}).then(r=>r.json()).then(d=>{
+        if(d.error){ toast(d.error); return; }
+        const seed = d.seed || '';
+        document.getElementById('seed-display').textContent = seed;
+        persistSeedDisplay(S.activePeer, seed);
+    }).catch(()=>toast('Failed to generate seed'));
+}
+
+function doPair(){
+    const seed = document.getElementById('seed-input').value.trim().toUpperCase();
+    if(!seed || seed.length !== 6 || !S.activePeer) {
+        toast('Enter a 6-character seed code'); return;
+    }
+    persistSeedInput(S.activePeer, seed);
+    socket.emit('seed_pair', {peer_id: S.activePeer, seed: seed});
+}
+
+document.getElementById('seed-input').addEventListener('input', (e) => {
+    const val = (e.target.value || '').toUpperCase();
+    e.target.value = val;
+    persistSeedInput(S.activePeer, val);
+});
+
+// ═══════════════════════════════════════════════
+//  FILE TRANSFER
+// ═══════════════════════════════════════════════
+function handleFileSelect(e){
+    const file=e.target.files[0];if(!file||!S.activePeer)return;
+    const fd=new FormData();fd.append('file',file);fd.append('peer_id',S.activePeer);
+    toast(`Sending ${file.name}...`);
+    fetch('/api/upload',{method:'POST',body:fd})
+        .then(r=>r.json()).then(d=>{if(d.file_id)addXferToast(d.file_id,d.filename,'send');else if(d.error)toast(d.error);})
+        .catch(()=>toast('Upload failed'));
+    e.target.value='';
+}
+
+function addXferToast(fid,fname,dir){
+    const c=document.getElementById('toasts');
+    const d=document.createElement('div');d.className='toast';d.id='xfer-'+fid;
+    d.innerHTML=`<div class="toast-header">${dir==='send'?'↑ Sending':'↓ Receiving'}: ${escHtml(fname)}</div>
+        <div class="toast-progress"><div class="toast-bar" style="width:0%"></div></div>
+        <div class="toast-info">Starting...</div>`;
+    c.appendChild(d);
+}
+
+function updateXfer(d){
+    let el=document.getElementById('xfer-'+d.file_id);
+    if(!el)addXferToast(d.file_id,d.filename,d.direction);
+    el=document.getElementById('xfer-'+d.file_id);
+    if(!el)return;
+    if(d.status==='failed'||d.status==='rejected'){
+        el.querySelector('.toast-header').textContent=`✗ ${d.filename} — ${d.status}`;
+        el.querySelector('.toast-bar').style.background='var(--red)';
+        setTimeout(()=>el.remove(),4000);return;
+    }
+    el.querySelector('.toast-bar').style.width=d.percent+'%';
+    const speed=d.speed>0?fmtBytes(d.speed)+'/s':'';
+    el.querySelector('.toast-info').textContent=`${d.percent}% · ${fmtBytes(d.progress)}/${fmtBytes(d.filesize)} ${speed}`;
+}
+
+function completeXfer(d){
+    const el=document.getElementById('xfer-'+d.file_id);
+    if(el){
+        el.querySelector('.toast-header').textContent=`✓ ${d.filename}`;
+        el.querySelector('.toast-bar').style.width='100%';
+        el.querySelector('.toast-bar').style.background='var(--green)';
+        el.querySelector('.toast-info').textContent='Complete';
+        setTimeout(()=>el.remove(),5000);
+    }
+}
+
+// ═══════════════════════════════════════════════
+//  WEBRTC CALLS WITH LIVE METRICS
+// ═══════════════════════════════════════════════
+const rtcConfig = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
+
+function initiateCall(type){
+    if(!S.activePeer)return;
+    S.callPeer=S.activePeer; S.callType=type; S.callDir='outgoing';
+    socket.emit('start_call',{peer_id:S.activePeer,call_type:type});
+}
+
+function acceptIncoming(){
+    if(!S.callPeer)return;
+    socket.emit('accept_call',{peer_id:S.callPeer});
+}
+
+async function startWebRTC(isCaller){
+    const host = location.hostname;
+    const isLocalhost = host === 'localhost' || host === '127.0.0.1';
+    if(!window.isSecureContext && !isLocalhost){
+        toast('WebRTC calls require a secure context (HTTPS). Opening this UI over plain HTTP on a LAN IP is blocked by the browser. Use HTTPS, or open the UI via http://localhost / http://127.0.0.1.');
+        return;
+    }
+    cleanupCall(false);
+    const isVideo = S.callType === 'video';
+    try {
+        localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: isVideo });
+    } catch(e) {
+        console.error('getUserMedia failed:', e);
+        toast('Could not access microphone/camera');
+        hangUp(); return;
+    }
+    showActiveCall(isVideo);
+    if(isVideo) {
+        const lv = document.getElementById('local-video');
+        lv.srcObject = localStream;
+        // Some browsers require an explicit play() even with autoplay.
+        lv.play?.().catch(()=>{});
+    }
+
+    pc = new RTCPeerConnection(rtcConfig);
+    localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
+
+    // In case ICE candidates arrived before pc was created.
+    flushPendingIce();
+
+    pc.ontrack = (e) => {
+        // Safari/Firefox may not always populate e.streams.
+        const stream = (e.streams && e.streams[0]) ? e.streams[0] : new MediaStream([e.track]);
+        if(e.track.kind === 'video') {
+            const rv = document.getElementById('remote-video');
+            rv.srcObject = stream;
+            rv.play?.().catch(()=>{});
+        } else {
+            const ra = document.getElementById('remote-audio');
+            ra.muted = false;
+            ra.volume = 1.0;
+            ra.srcObject = stream;
+            // Autoplay политики иногда блокируют звук без явного play().
+            ra.play?.().catch(()=>{});
+        }
+    };
+
+    pc.onicecandidate = (e) => {
+        if(e.candidate && S.callPeer)
+            socket.emit('webrtc_ice', {peer_id: S.callPeer, candidate: e.candidate.toJSON()});
+    };
+
+    pc.onconnectionstatechange = () => {
+        if(pc.connectionState === 'connected'){ S.callActive = true; startTimer(); startRTCStats(); }
+        if(pc.connectionState === 'disconnected' || pc.connectionState === 'failed') hangUp();
+    };
+
+    if(isCaller){
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        socket.emit('webrtc_offer', {peer_id: S.callPeer, sdp: offer, call_type: S.callType});
+    }
+}
+
+function flushPendingIce(){
+    if(!pc || !pc.remoteDescription) return;
+    const arr = Array.isArray(S._pendingIce) ? S._pendingIce : [];
+    if(!arr.length) return;
+    S._pendingIce = [];
+    arr.forEach(async c => {
+        try { await pc.addIceCandidate(new RTCIceCandidate(c)); }
+        catch(e) {}
+    });
+}
+
+// Live WebRTC stats from getStats() API
+// Exponential moving average factor: 0.3 = responsive but smooth
+const RTC_EMA = 0.3;
+const _rtcState = {
+    prevLost:0, prevRecv:0, prevBytes:0,
+    emaLatency:0, emaLoss:0, emaJitter:0, emaBitrate:0,
+    ready:false,
+};
+
+function startRTCStats(){
+    stopRTCStats();
+    Object.assign(_rtcState, {prevLost:0,prevRecv:0,prevBytes:0,emaLatency:0,emaLoss:0,emaJitter:0,emaBitrate:0,ready:false});
+    _rtcStatsInterval = setInterval(async () => {
+        if(!pc) return;
+        try {
+            const stats = await pc.getStats();
+            let rtt = 0, jitter = 0, packetsLost = 0, packetsRecv = 0, bytesRecv = 0;
+
+            stats.forEach(report => {
+                // RTT via STUN ping on the active ICE candidate pair
+                if(report.type === 'candidate-pair' && report.state === 'succeeded' && report.currentRoundTripTime){
+                    rtt = Math.round(report.currentRoundTripTime * 1000);
+                }
+                // RTT via RTCP SR/RR — more accurate once flow is established
+                if(report.type === 'remote-inbound-rtp' && report.roundTripTime > 0){
+                    rtt = Math.round(report.roundTripTime * 1000);
+                }
+                // Jitter + packet loss counters from inbound audio stream
+                if(report.type === 'inbound-rtp' && report.kind === 'audio'){
+                    jitter = report.jitter ? Math.round(report.jitter * 1000) : 0;
+                    packetsLost = report.packetsLost || 0;
+                    packetsRecv = report.packetsReceived || 0;
+                }
+                // Total received bytes across all inbound streams (audio + video)
+                if(report.type === 'inbound-rtp'){
+                    bytesRecv += report.bytesReceived || 0;
+                }
+            });
+
+            if(!_rtcState.ready){
+                // Seed EMA with first sample
+                _rtcState.emaLatency = rtt;
+                _rtcState.emaJitter  = jitter;
+                _rtcState.emaLoss    = 0;
+                _rtcState.emaBitrate = 0;
+                _rtcState.prevLost   = packetsLost;
+                _rtcState.prevRecv   = packetsRecv;
+                _rtcState.prevBytes  = bytesRecv;
+                _rtcState.ready      = true;
+            } else {
+                // Latency EMA: skip sample if RTT is 0 (STUN not yet measured)
+                if(rtt > 0)
+                    _rtcState.emaLatency = RTC_EMA * rtt + (1 - RTC_EMA) * _rtcState.emaLatency;
+
+                // Jitter EMA (jitter is already a running average from browser, EMA smooths display)
+                _rtcState.emaJitter = RTC_EMA * jitter + (1 - RTC_EMA) * _rtcState.emaJitter;
+
+                // Packet loss: delta-based (packets lost THIS second / packets expected THIS second)
+                // This makes the metric reactive: drops to 0 when link recovers.
+                const dLost  = Math.max(0, packetsLost - _rtcState.prevLost);
+                const dRecv  = Math.max(0, packetsRecv  - _rtcState.prevRecv);
+                const dTotal = dLost + dRecv;
+                const intervalLoss = dTotal > 0 ? (dLost / dTotal) * 100 : 0;
+                _rtcState.emaLoss = RTC_EMA * intervalLoss + (1 - RTC_EMA) * _rtcState.emaLoss;
+                _rtcState.prevLost = packetsLost;
+                _rtcState.prevRecv = packetsRecv;
+
+                // Bitrate: bytes delta over 1s interval → kbps
+                const dBytes = Math.max(0, bytesRecv - _rtcState.prevBytes);
+                const kbps   = (dBytes * 8) / 1000;
+                _rtcState.emaBitrate = RTC_EMA * kbps + (1 - RTC_EMA) * _rtcState.emaBitrate;
+                _rtcState.prevBytes  = bytesRecv;
+            }
+
+            const set = (id,v) => { const el=document.getElementById(id); if(el) el.textContent=v; };
+            set('m-latency', `${Math.round(_rtcState.emaLatency)} ms`);
+            set('m-loss',    `${_rtcState.emaLoss.toFixed(1)}%`);
+            set('m-jitter',  `${Math.round(_rtcState.emaJitter)} ms`);
+            set('m-bitrate', `${Math.round(_rtcState.emaBitrate)} kbps`);
+        } catch(e){}
+    }, 1000);
+}
+
+function stopRTCStats(){
+    if(_rtcStatsInterval){ clearInterval(_rtcStatsInterval); _rtcStatsInterval = null; }
+    _rtcState.ready = false;
+}
+
+function showRinging(name, type, incoming){
+    const ov = document.getElementById('call-overlay');
+    ov.classList.add('visible');
+    document.getElementById('ringing-ui').style.display='flex';
+    document.getElementById('active-call-ui').style.display='none';
+    document.getElementById('call-name-ring').textContent=name;
+    document.getElementById('call-status-ring').textContent= incoming ? `Incoming ${type} call...` : 'Ringing...';
+    document.getElementById('call-avatar-ring').textContent=pInit(name);
+    document.getElementById('call-avatar-ring').style.background=pColor(S.callPeer||'');
+    document.getElementById('btn-accept').style.display=incoming?'':'none';
+}
+
+function showActiveCall(isVideo){
+    document.getElementById('ringing-ui').style.display='none';
+    const acu=document.getElementById('active-call-ui');
+    acu.style.display='flex';
+    if(isVideo){
+        document.getElementById('call-videos').style.display='block';
+        document.getElementById('call-audio-only').style.display='none';
+    } else {
+        document.getElementById('call-videos').style.display='none';
+        document.getElementById('call-audio-only').style.display='flex';
+        const p=S.peers.find(x=>x.peer_id===S.callPeer);
+        if(p){
+            document.getElementById('call-name-active').textContent=p.name;
+            document.getElementById('call-avatar-active').textContent=pInit(p.name);
+            document.getElementById('call-avatar-active').style.background=pColor(p.peer_id);
+        }
+    }
+}
+
+function hideCall(){ document.getElementById('call-overlay').classList.remove('visible'); }
+
+function hangUp(){
+    socket.emit('end_call');
+    cleanupCall();
+    hideCall();
+}
+
+function cleanupCall(full=true){
+    stopRTCStats();
+    if(pc){try{pc.close();}catch(e){}pc=null;}
+    if(localStream){localStream.getTracks().forEach(t=>t.stop());localStream=null;}
+    document.getElementById('remote-video').srcObject=null;
+    document.getElementById('local-video').srcObject=null;
+    document.getElementById('remote-audio').srcObject=null;
+    S.callActive=false; S.muted=false; S.videoOff=false;
+    if(S.callTimer){clearInterval(S.callTimer);S.callTimer=null;}
+    S.callSec=0;
+    const timerEl=document.getElementById('call-timer');if(timerEl)timerEl.textContent='00:00';
+    document.getElementById('btn-mute').classList.remove('active');
+    document.getElementById('btn-vidtoggle').classList.remove('active');
+    // Reset metric display
+    ['m-latency','m-loss','m-jitter','m-bitrate'].forEach(id=>{
+        const el=document.getElementById(id);if(el)el.textContent='— ';
+    });
+    if(full){S.callPeer=null; S.callDir=null;}
+}
+
+function startTimer(){
+    S.callSec=0;
+    const el=document.getElementById('call-timer');
+    el.textContent='00:00';
+    S.callTimer=setInterval(()=>{
+        S.callSec++;
+        const m=String(Math.floor(S.callSec/60)).padStart(2,'0');
+        const s=String(S.callSec%60).padStart(2,'0');
+        el.textContent=m+':'+s;
+    },1000);
+}
+
+function toggleMute(){
+    S.muted=!S.muted;
+    if(localStream)localStream.getAudioTracks().forEach(t=>t.enabled=!S.muted);
+    document.getElementById('btn-mute').classList.toggle('active',S.muted);
+}
+
+function toggleVideo(){
+    S.videoOff=!S.videoOff;
+    if(localStream)localStream.getVideoTracks().forEach(t=>t.enabled=!S.videoOff);
+    document.getElementById('btn-vidtoggle').classList.toggle('active',S.videoOff);
+}
+
+// ═══════════════════════════════════════════════
+//  TOASTS
+// ═══════════════════════════════════════════════
+function toast(text){
+    const c=document.getElementById('toasts');
+    const d=document.createElement('div');d.className='toast';
+    d.innerHTML=`<div class="toast-header">${escHtml(text)}</div>`;
+    c.appendChild(d);setTimeout(()=>d.remove(),4000);
+}
+
+// ═══════════════════════════════════════════════
+//  ADD PEER MODAL
+// ═══════════════════════════════════════════════
+function showAddPeerModal(){
+    document.getElementById('add-peer-modal').classList.add('visible');
+}
+
+function hideAddPeerModal(){
+    document.getElementById('add-peer-modal').classList.remove('visible');
+    document.getElementById('peer-ip').value = '';
+    document.getElementById('peer-port').value = '5151';
+    document.getElementById('peer-name').value = '';
+}
+
+function addPeer(){
+    const ip = document.getElementById('peer-ip').value.trim();
+    const port = parseInt(document.getElementById('peer-port').value);
+    const name = document.getElementById('peer-name').value.trim();
+    if(!ip){
+        toast('IP address is required');
+        return;
+    }
+    if(isNaN(port) || port < 1 || port > 65535){
+        toast('Invalid port number');
+        return;
+    }
+    fetch('/api/add_peer', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ip: ip, tcp_port: port, name: name || undefined})
+    }).then(r => r.json()).then(d => {
+        if(d.error){
+            toast(d.error);
+        } else {
+            toast('Peer added successfully');
+            hideAddPeerModal();
+        }
+    }).catch(() => toast('Failed to add peer'));
+}
+</script>
+</body>
+</html>
