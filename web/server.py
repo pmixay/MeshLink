@@ -308,6 +308,22 @@ def api_network_diagnostics():
     return jsonify(node.get_network_diagnostics())
 
 
+@app.route("/api/stats")
+def api_stats():
+    """Combined stats endpoint: security events + network diagnostics."""
+    limit_raw = request.args.get("limit", "200")
+    try:
+        limit = max(1, int(limit_raw))
+    except Exception:
+        limit = 200
+    return jsonify({
+        "security": node.get_security_snapshot(),
+        "events": node.get_security_events(limit),
+        "network": node.get_network_diagnostics(),
+        "metrics": node.get_metrics_snapshot(),
+    })
+
+
 # ── Socket.IO events ────────────────────────────────────
 
 @socketio.on("connect")

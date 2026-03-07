@@ -96,13 +96,15 @@ MESSAGING_SEND_SLOT_TIMEOUT = float(os.environ.get("MESHLINK_MSG_SEND_SLOT_TIMEO
 MESSAGING_OUTBOX_MAX_PENDING = int(os.environ.get("MESHLINK_MSG_OUTBOX_MAX_PENDING", 5000))
 
 # ──────────────────────────────────────────────
-# Trust policy
+# Trust policy  (SECURITY DEFAULT: all channels require seed-pairing)
 # ──────────────────────────────────────────────
-# If enabled, personal text messages are accepted/sent only for seed-paired peers.
-TRUSTED_ONLY_PRIVATE_CHATS = os.environ.get("MESHLINK_TRUSTED_ONLY", "0") in ("1", "true", "True")
-TRUSTED_ONLY_TEXT = os.environ.get("MESHLINK_TRUSTED_ONLY_TEXT", "1" if TRUSTED_ONLY_PRIVATE_CHATS else "0") in ("1", "true", "True")
-TRUSTED_ONLY_FILE = os.environ.get("MESHLINK_TRUSTED_ONLY_FILE", "0") in ("1", "true", "True")
-TRUSTED_ONLY_CALL = os.environ.get("MESHLINK_TRUSTED_ONLY_CALL", "0") in ("1", "true", "True")
+# Peer must exchange a 6-char seed phrase before any communication is allowed.
+# These are ON by default per the security requirements; override via env only
+# in controlled environments / testing.
+TRUSTED_ONLY_PRIVATE_CHATS = os.environ.get("MESHLINK_TRUSTED_ONLY", "1") in ("1", "true", "True")
+TRUSTED_ONLY_TEXT = os.environ.get("MESHLINK_TRUSTED_ONLY_TEXT", "1") in ("1", "true", "True")
+TRUSTED_ONLY_FILE = os.environ.get("MESHLINK_TRUSTED_ONLY_FILE", "1") in ("1", "true", "True")
+TRUSTED_ONLY_CALL = os.environ.get("MESHLINK_TRUSTED_ONLY_CALL", "1") in ("1", "true", "True")
 
 # ──────────────────────────────────────────────
 # Helpers

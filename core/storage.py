@@ -22,6 +22,7 @@ _CONN_LOCK = threading.Lock()   # guards _CONN first-time initialization
 
 
 def _base_dir() -> str:
+    """Return the base data directory (project_root/data)."""
     base = os.environ.get("MESHLINK_DATA_DIR", "").strip()
     if not base:
         base = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
@@ -29,8 +30,30 @@ def _base_dir() -> str:
     return base
 
 
+def _user_dir() -> str:
+    """
+    Return a per-user data directory so multiple instances can share a folder.
+
+    The directory name is derived from NODE_NAME and the first 8 chars of
+    NODE_ID, giving a stable, human-readable path like:
+        data/alice_a1b2c3d4/
+    Characters that are unsafe in filenames are replaced with '_'.
+    """
+    # Import here to avoid circular imports at module load time.
+    try:
+        from .config import NODE_NAME, NODE_ID
+    except ImportError:
+        NODE_NAME, NODE_ID = "meshlink", "00000000"
+
+    safe_name = "".join(c if c.isalnum() or c in "-." else "_" for c in NODE_NAME)
+    folder = f"{safe_name}_{NODE_ID[:8]}"
+    path = os.path.join(_base_dir(), folder)
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
 def db_path() -> str:
-    return os.path.join(_base_dir(), "meshlink.db")
+    return os.path.join(_user_dir(), "meshlink.db")
 
 
 def _connect() -> sqlite3.Connection:

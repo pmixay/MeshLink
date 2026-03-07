@@ -20,6 +20,8 @@ from .config import (
     BROADCAST_ADDR, MULTICAST_GROUP, DISCOVERY_MAGIC,
 )
 
+# LOCAL_IP is imported above and used in multicast join
+
 logger = logging.getLogger("meshlink.discovery")
 
 
@@ -85,16 +87,45 @@ class DiscoveryService:
 
     # ── Broadcaster ─────────────────────────────────────────────────────────
 
-    def _broadcast_loop(self):
+    def _make_broadcast_sock(self) -> socket.socket:
+        """Create a UDP socket suitable for sending broadcast + multicast."""
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+        except (AttributeError, OSError):
+            pass
         sock.settimeout(1.0)
+        # Multicast TTL = 1 (LAN only)
+        sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL,
+                        struct.pack("b", 1))
+        # Disable multicast loopback so we don't receive our own multicasts
+        try:
+            sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_LOOP, 0)
+        except OSError:
+            pass
+        return sock
 
-        ttl = struct.pack("b", 1)
-        sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, ttl)
-
+    def _broadcast_loop(self):
+        sock = self._make_broadcast_sock()
         logger.info(f"Broadcasting on port {DISCOVERY_PORT} as '{NODE_NAME}' ({NODE_ID})")
+
+        # Send an immediate burst so peers appear quickly without waiting
+        # for the first regular interval tick.
+        for _ in range(5):
+            if not self._running:
+                break
+            try:
+                msg = self._make_announcement()
+                sock.sendto(msg, (BROADCAST_ADDR, DISCOVERY_PORT))
+                try:
+                    sock.sendto(msg, (MULTICAST_GROUP, DISCOVERY_PORT))
+                except Exception:
+                    pass
+            except Exception as e:
+                logger.debug(f"Burst broadcast error: {e}")
+            time.sleep(0.3)
 
         while self._running:
             try:
@@ -116,19 +147,27 @@ class DiscoveryService:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
-        except AttributeError:
+        except (AttributeError, OSError):
             pass
+        # Bind to all interfaces so we receive both broadcast AND unicast packets
         sock.bind(("", DISCOVERY_PORT))
 
-        # Join multicast group
-        # Use "4s4s" (two fixed 4-byte fields) to match struct ip_mreq regardless
-        # of platform word size. "4sL" is wrong on 64-bit Linux where L=8 bytes.
+        # Join multicast group on all interfaces
+        # Use "4s4s" to match struct ip_mreq regardless of platform word size.
         try:
             group = socket.inet_aton(MULTICAST_GROUP)
-            mreq  = struct.pack("4s4s", group, socket.inet_aton("0.0.0.0"))
-            sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+            # Join on the specific LAN interface
+            mreq_lan = struct.pack("4s4s", group, socket.inet_aton(LOCAL_IP))
+            sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq_lan)
         except Exception as e:
-            logger.debug(f"Multicast join failed: {e}")
+            logger.debug(f"Multicast join (LAN iface) failed: {e}")
+        try:
+            # Also join on INADDR_ANY as fallback
+            group = socket.inet_aton(MULTICAST_GROUP)
+            mreq_any = struct.pack("4s4s", group, socket.inet_aton("0.0.0.0"))
+            sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq_any)
+        except Exception:
+            pass
 
         sock.settimeout(1.0)
         logger.info(f"Listening for peers on port {DISCOVERY_PORT}")

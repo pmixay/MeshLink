@@ -182,32 +182,40 @@
             </div>
         </div>
         <div class="security-panel">
-            <div class="diag-tabs">
-                <button class="diag-tab active" id="tab-security" onclick="switchDiagTab('security')">Security Events</button>
-                <button class="diag-tab" id="tab-network" onclick="switchDiagTab('network')">Network Diagnostics</button>
-            </div>
+            <div class="security-title">Stats & Security</div>
 
-            <div class="diag-pane active" id="pane-security">
-                <div class="security-title">Security Events</div>
-                <div class="security-row"><span>Trusted-only</span><strong id="sec-trusted-only">off</strong></div>
-                <div class="security-row"><span>Blacklist</span><strong id="sec-blacklist">0</strong></div>
-                <div class="security-row"><span>Banned</span><strong id="sec-banned">0</strong></div>
-                <div class="security-filter">
-                    <input type="text" id="sec-filter-peer" placeholder="Filter by peer_id" oninput="renderSecurityPanel()">
-                    <select id="sec-filter-type" onchange="renderSecurityPanel()">
-                        <option value="">All events</option>
-                        <option value="blocked">Blocked</option>
-                        <option value="dropped">Dropped</option>
-                        <option value="session">Session</option>
-                    </select>
-                </div>
-                <div class="security-log" id="sec-log"></div>
-            </div>
+            <!-- Network metrics row -->
+            <div class="diag-grid" id="diag-grid" style="margin-bottom:8px"></div>
 
-            <div class="diag-pane" id="pane-network">
-                <div class="security-title">Network Diagnostics</div>
-                <div class="diag-grid" id="diag-grid"></div>
+            <!-- Security counters -->
+            <div class="security-row"><span>Trusted-only</span><strong id="sec-trusted-only">on</strong></div>
+            <div class="security-row"><span>Blocked peers</span><strong id="sec-blacklist">0</strong></div>
+            <div class="security-row"><span>Temp banned</span><strong id="sec-banned">0</strong></div>
+
+            <!-- Event log with filter -->
+            <div class="security-filter">
+                <input type="text" id="sec-filter-peer" placeholder="Filter by peer" oninput="renderSecurityPanel()">
+                <select id="sec-filter-type" onchange="renderSecurityPanel()">
+                    <option value="">All events</option>
+                    <option value="blocked">Blocked</option>
+                    <option value="dropped">Dropped</option>
+                    <option value="session">Session</option>
+                    <option value="paired">Paired</option>
+                </select>
             </div>
+            <div class="security-log" id="sec-log"></div>
+        </div>
+
+        <!-- Seed Pair modal (shown inline below peers when needed) -->
+        <div id="pair-banner" style="display:none;padding:10px 12px;background:var(--bg2);border-top:1px solid var(--border);font-size:12px">
+            <div style="color:var(--orange);margin-bottom:6px;font-weight:600">⚠ Pair to enable messaging</div>
+            <div style="color:var(--t2);margin-bottom:8px">Exchange a 6-char seed phrase with this peer to establish a trusted connection.</div>
+            <div style="display:flex;gap:6px">
+                <input id="seed-input" type="text" maxlength="6" placeholder="6-char seed" style="flex:1;background:var(--bg3);border:1px solid var(--border2);border-radius:8px;color:var(--t1);font-family:'JetBrains Mono',monospace;font-size:13px;padding:7px 10px;outline:none;text-transform:uppercase">
+                <button onclick="doSeedPair()" style="background:var(--accent);border:none;border-radius:8px;color:#fff;padding:7px 14px;cursor:pointer;font-size:13px">Pair</button>
+                <button onclick="genSeed()" style="background:var(--bg3);border:1px solid var(--border2);border-radius:8px;color:var(--t2);padding:7px 10px;cursor:pointer;font-size:11px">Generate</button>
+            </div>
+            <div id="pair-seed-display" style="margin-top:6px;color:var(--green);font-family:'JetBrains Mono',monospace;font-size:13px;display:none"></div>
         </div>
     </div>
 
@@ -344,7 +352,7 @@ const socket = io();
 
 socket.on('node_info', i => {
     S.nodeId=i.node_id; S.nodeName=i.node_name;
-    document.getElementById('node-label').textContent=`${i.node_name} · ${i.local_ip}`;
+    document.getElementById('node-label').textContent=i.node_name;
     S.security.trustedOnly=Boolean(i.trusted_only_private_chats);
     renderSecurityPanel();
 });
@@ -366,13 +374,17 @@ socket.on('message', m => {
     else{S.unread[pid]=(S.unread[pid]||0)+1;renderPeers();}
 });
 socket.on('message_sent', m => {
-    if(!m || !m.msg_id || !S.activePeer)return;
-    if(!S.messages[S.activePeer])S.messages[S.activePeer]=[];
-    const arr=S.messages[S.activePeer];
+    if(!m || !m.msg_id) return;
+    // Find which peer this message belongs to (it's our own message, is_me=true)
+    const pid = S.activePeer;  // we only send to the currently active peer
+    if(!pid) return;
+    if(!S.messages[pid]) S.messages[pid]=[];
+    const arr=S.messages[pid];
     const idx=arr.findIndex(x=>x.msg_id===m.msg_id);
-    if(idx>=0){arr[idx]={...arr[idx],...m};}
-    else{arr.push(m);}
-    if(S.activePeer===m.sender_id || m.is_me) renderMsgs(S.activePeer);
+    if(idx>=0){ arr[idx]={...arr[idx],...m}; }
+    else{ arr.push(m); }
+    // Render only if we're looking at the relevant chat
+    if(m.is_me || S.activePeer===pid) renderMsgs(pid);
 });
 socket.on('message_status', d => {
     const pid=d.peer_id;
@@ -389,6 +401,7 @@ socket.on('chat_history', d => { S.messages[d.peer_id]=d.messages; if(S.activePe
 socket.on('media_stats', d => {
     S.mediaStats=d||S.mediaStats;
     renderCallMetrics();
+    renderDiagnosticsPanel();  // keep stats panel live during calls
 });
 socket.on('security_event', e => {
     if(!e)return;
@@ -468,9 +481,10 @@ function renderPeers(){
     el.innerHTML=S.peers.map(p=>{
         const a=S.activePeer===p.peer_id?' active':'';
         const u=S.unread[p.peer_id]||0;
+        const trusted=p.trusted?'<span title="Trusted peer" style="color:var(--green);font-size:11px">🔒</span>':'<span title="Not yet paired" style="color:var(--t3);font-size:11px">🔓</span>';
         return `<div class="peer-item${a}" onclick="selectPeer('${p.peer_id}')">
             <div class="peer-avatar" style="background:${pColor(p.peer_id)}">${pInit(p.name)}<div class="status-dot"></div></div>
-            <div class="peer-info"><div class="peer-name">${escHtml(p.name)}</div><div class="peer-ip">${p.ip}</div></div>
+            <div class="peer-info"><div class="peer-name">${escHtml(p.name)}</div><div class="peer-ip">${trusted} ${p.trusted?'paired':'not paired'}</div></div>
             ${u?`<div class="peer-unread">${u}</div>`:''}
         </div>`;
     }).join('');
@@ -484,9 +498,11 @@ function selectPeer(pid){
     document.getElementById('chat-avatar').style.background=pColor(pid);
     document.getElementById('chat-avatar').textContent=pInit(p.name);
     document.getElementById('chat-peer-name').textContent=p.name;
-    document.getElementById('chat-peer-status').textContent=`online · ${p.ip}`;
+    document.getElementById('chat-peer-status').textContent=p.trusted ? 'online · secured' : 'online · not paired';
     socket.emit('get_chat',{peer_id:pid});
     renderMsgs(pid);
+    // Show pairing banner if peer is not yet trusted
+    showPairBanner(pid, p);
 }
 
 function renderMsgs(pid){
@@ -559,10 +575,15 @@ function appendMsg(m,anim=true){
         h+=`<div>${escHtml(m.text)}</div>`;
 
         const badges=[];
-        if(m.encrypted)badges.push('<span class="msg-badge badge-enc">🔒 encrypted</span>');
-        if(m.signed)badges.push('<span class="msg-badge badge-signed">✍ signed</span>');
-        if(m.text==='[decryption failed]' || (m.signed===false && !me)){
-            badges.push('<span class="msg-badge badge-risk">⚠ risk</span>');
+        // Single lock icon: green closed = encrypted+signed, grey open = insecure
+        const isSecure = Boolean(m.encrypted) && (m.signed !== false);
+        const hasProblem = m.text==='[decryption failed]' || (m.signed===false && !me);
+        if(hasProblem){
+            badges.push('<span class="msg-badge badge-risk" title="Message integrity issue">⚠ risk</span>');
+        } else if(isSecure){
+            badges.push('<span title="End-to-end encrypted & verified" style="color:var(--green);font-size:15px;line-height:1">🔒</span>');
+        } else if(!me){
+            badges.push('<span title="No encryption detected" style="color:var(--t3);font-size:15px;line-height:1">🔓</span>');
         }
 
         const statusTxt = me && m.status ? `<span class="msg-status ${escHtml(m.status)}">${escHtml(m.status)}</span>` : '';
@@ -574,15 +595,15 @@ function appendMsg(m,anim=true){
 
 function renderCallMetrics(){
     const s=S.mediaStats||{};
-    const latency=Math.round(Number(s.latency_ms||0));
-    const loss=Number(s.loss_percent||0).toFixed(2);
-    const jitter=Number(s.jitter_ms||0).toFixed(2);
-    const bitrate=Number(s.bitrate_kbps||0).toFixed(2);
+    const latency=Number(s.latency_ms||s.downlink_latency_ms||0).toFixed(1);
+    const loss=Number(s.loss_percent||0).toFixed(1);
+    const jitter=Number(s.jitter_ms||s.downlink_jitter_ms||0).toFixed(1);
+    const bitrate=Number(s.bitrate_kbps||s.downlink_bitrate_kbps||0).toFixed(0);
     const set=(id,v)=>{const el=document.getElementById(id);if(el)el.textContent=v;};
     set('m-latency', `${latency} ms`);
     set('m-loss', `${loss}%`);
     set('m-jitter', `${jitter} ms`);
-    set('m-bitrate', `${bitrate} kbps`);
+    set('m-bitrate', Number(bitrate)>0 ? `${bitrate} kbps` : '— kbps');
 }
 
 function renderSecurityPanel(){
@@ -607,23 +628,16 @@ function renderSecurityPanel(){
             })
             .slice(-20)
             .reverse();
-        logEl.innerHTML=rows.length?rows.map(ev=>`<div class="security-log-item">`+
-            `<strong>${escHtml(ev.event||'event')}</strong><br>`+
-            `<span>${escHtml((ev.peer_id||'system')+' · '+fmtTs(ev.ts||Date.now()/1000))}</span>`+
-            `</div>`).join(''):'<div class="security-log-item">No security events yet</div>';
+        logEl.innerHTML=rows.length?rows.map(ev=>{
+            const isGood=ev.event&&(ev.event.includes('paired')||ev.event.includes('rotated'));
+            const color=isGood?'var(--green)':ev.event&&ev.event.includes('drop')?'var(--red)':'var(--t2)';
+            return `<div class="security-log-item"><span style="color:${color}">${escHtml(ev.event||'event')}</span><br>`+
+                `<span style="color:var(--t3)">${escHtml((ev.peer_id||'system').slice(0,12))} · ${fmtTs(ev.ts||Date.now()/1000)}</span>`+
+                `</div>`;
+        }).join(''):'<div class="security-log-item" style="color:var(--t3)">No events yet</div>';
     }
-}
-
-function switchDiagTab(tab){
-    const secTab=document.getElementById('tab-security');
-    const netTab=document.getElementById('tab-network');
-    const secPane=document.getElementById('pane-security');
-    const netPane=document.getElementById('pane-network');
-    const onSecurity=tab==='security';
-    secTab.classList.toggle('active',onSecurity);
-    netTab.classList.toggle('active',!onSecurity);
-    secPane.classList.toggle('active',onSecurity);
-    netPane.classList.toggle('active',!onSecurity);
+    // Also refresh diagnostics grid in the merged panel
+    renderDiagnosticsPanel();
 }
 
 function renderDiagnosticsPanel(){
@@ -632,23 +646,83 @@ function renderDiagnosticsPanel(){
     const delivery=d.delivery||{};
     const ft=d.file_transfer||{};
     const m=d.media||{};
+    const net=d.network||{};
     const diag=document.getElementById('diag-grid');
     if(!diag)return;
-    const row=(k,v)=>`<div class="diag-item"><span>${escHtml(k)}</span><strong>${escHtml(String(v))}</strong></div>`;
+    const row=(k,v,unit='')=>`<div class="diag-item"><span>${escHtml(k)}</span><strong>${escHtml(String(v))}${unit?'<span style="font-size:10px;color:var(--t3)"> '+unit+'</span>':''}</strong></div>`;
+    const peers=S.peers.length;
+    const activeMs=S.mediaStats||{};
     const items=[
-        row('Delivery retries', Number(delivery.retry_total||0).toFixed(0)),
-        row('Delivery failures', Number(delivery.fail_total||0).toFixed(0)),
-        row('Failed reason', delivery.failed_reason||'none'),
+        row('Active peers', peers),
+        row('Latency', Number(activeMs.latency_ms||0).toFixed(1), 'ms'),
+        row('Jitter', Number(activeMs.jitter_ms||0).toFixed(1), 'ms'),
+        row('Loss', Number(activeMs.loss_percent||0).toFixed(1), '%'),
         row('Outbox backlog', Number(q.outbox_backlog||0).toFixed(0)),
-        row('Relay pending', Number(q.relay_pending||0).toFixed(0)),
         row('Relay drops', Number(q.relay_drops_total||0).toFixed(0)),
-        row('Active sends', `${Number(ft.active_sends||0).toFixed(0)}/${Number(ft.max_active_sends||0).toFixed(0)}`),
-        row('Send slots free', Number(ft.available_send_slots||0).toFixed(0)),
-        row('Downlink loss', `${Number(m.downlink_loss_percent||0).toFixed(2)}%`),
-        row('Downlink bitrate', `${Number(m.downlink_bitrate_kbps||0).toFixed(2)} kbps`),
+        row('Msg retries', Number(delivery.retry_total||0).toFixed(0)),
     ];
     diag.innerHTML=items.join('');
 }
+
+// Seed pairing helpers
+function showPairBanner(pid, peer){
+    const banner=document.getElementById('pair-banner');
+    if(!banner) return;
+    if(peer && peer.trusted){
+        banner.style.display='none';
+    } else {
+        banner.style.display='block';
+        banner._pairTarget=pid;
+    }
+}
+
+function genSeed(){
+    fetch('/api/seed/generate',{method:'POST'})
+        .then(r=>r.json())
+        .then(d=>{
+            if(d.seed){
+                const inp=document.getElementById('seed-input');
+                if(inp) inp.value=d.seed;
+                const disp=document.getElementById('pair-seed-display');
+                if(disp){disp.textContent=`Share this seed with peer: ${d.seed}`;disp.style.display='block';}
+            }
+        }).catch(()=>{});
+}
+
+function doSeedPair(){
+    const banner=document.getElementById('pair-banner');
+    const inp=document.getElementById('seed-input');
+    if(!banner||!inp||!banner._pairTarget) return;
+    const seed=inp.value.trim().toUpperCase();
+    if(seed.length!==6){toast('Seed must be exactly 6 characters');return;}
+    socket.emit('seed_pair',{peer_id:banner._pairTarget,seed});
+}
+
+socket.on('seed_pair_result', d=>{
+    if(d.ok){
+        toast('Paired successfully!');
+        const pi=S.peers.findIndex(x=>x.peer_id===d.peer_id);
+        if(pi>=0) S.peers[pi].trusted=true;
+        renderPeers();
+        if(S.activePeer===d.peer_id){
+            document.getElementById('pair-banner').style.display='none';
+            document.getElementById('chat-peer-status').textContent='online · secured';
+        }
+    } else {
+        toast('Pairing failed — check seed');
+    }
+});
+
+socket.on('seed_paired', d=>{
+    const pi=S.peers.findIndex(x=>x.peer_id===d.peer_id);
+    if(pi>=0) S.peers[pi].trusted=true;
+    renderPeers();
+    toast(`${d.peer_name||'Peer'} paired`);
+    if(S.activePeer===d.peer_id){
+        document.getElementById('pair-banner').style.display='none';
+        document.getElementById('chat-peer-status').textContent='online · secured';
+    }
+});
 
 function scrollBot(){const c=document.getElementById('messages');requestAnimationFrame(()=>c.scrollTop=c.scrollHeight);}
 
@@ -671,9 +745,8 @@ function handleTyping(){
 }
 function sendMessage(){
     const t=msgInput.value.trim();if(!t||!S.activePeer)return;
-    const m={msg_id:Date.now().toString(),sender_id:S.nodeId,sender_name:S.nodeName,text:t,timestamp:Date.now()/1000,is_me:true,msg_type:'text'};
-    if(!S.messages[S.activePeer])S.messages[S.activePeer]=[];
-    S.messages[S.activePeer].push(m);appendMsg(m);scrollBot();
+    // Do NOT add the message locally — wait for message_sent event from server.
+    // This prevents the double-message bug (local temp msg + confirmed server msg).
     socket.emit('send_message',{peer_id:S.activePeer,text:t});
     msgInput.value='';msgInput.style.height='auto';btnSend.disabled=true;
 }

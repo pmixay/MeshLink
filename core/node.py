@@ -22,6 +22,7 @@ from typing import Dict, List, Optional, Callable
 from .config import (
     NODE_ID, NODE_NAME, LOCAL_IP,
     TCP_PORT, MEDIA_PORT, FILE_PORT, DOWNLOADS_DIR,
+    DISCOVERY_PORT, WEB_PORT,
     MESH_TTL_DEFAULT, MESH_LRU_MAX_SIZE,
     RATE_LIMIT_MAX_MSGS, RATE_LIMIT_WINDOW, RATE_LIMIT_BAN_SECS,
     TRUSTED_ONLY_PRIVATE_CHATS,
@@ -417,6 +418,18 @@ class MeshNode:
     def start(self):
         logger.info(f"Starting MeshLink: {NODE_NAME} ({NODE_ID}) @ {LOCAL_IP}")
         self._running = True
+        # Open firewall ports (best-effort, non-blocking)
+        try:
+            from services.firewall import open_meshlink_ports
+            open_meshlink_ports(
+                discovery_port=DISCOVERY_PORT,
+                tcp_port=TCP_PORT,
+                media_port=MEDIA_PORT,
+                file_port=FILE_PORT,
+                web_port=WEB_PORT,
+            )
+        except Exception as e:
+            logger.debug(f"Firewall setup skipped: {e}")
         self.discovery.start()
         self.msg_server.start()
         self.file_mgr.start()
@@ -852,13 +865,8 @@ class MeshNode:
         return {
             "node_id":     NODE_ID,
             "node_name":   NODE_NAME,
-            "local_ip":    LOCAL_IP,
-            "tcp_port":    TCP_PORT,
-            "media_port":  MEDIA_PORT,
-            "file_port":   FILE_PORT,
-            "downloads_dir": DOWNLOADS_DIR,
+            # local_ip intentionally omitted — metadata minimisation principle.
             "encryption":  self.crypto.keypair.private_key is not None,
-            "signing_key": self.crypto.signing_key_b64,
             "trusted_only_private_chats": TRUSTED_ONLY_PRIVATE_CHATS,
             "trusted_only_text": bool(TRUSTED_ONLY_TEXT or TRUSTED_ONLY_PRIVATE_CHATS),
             "trusted_only_file": TRUSTED_ONLY_FILE,
@@ -866,7 +874,11 @@ class MeshNode:
         }
 
     def get_peers(self) -> list:
-        return self.discovery.get_peers()
+        """Return peer list with IP addresses stripped (metadata minimisation)."""
+        peers = self.discovery.get_peers()
+        for p in peers:
+            p.pop("ip", None)   # never expose raw IPs to the UI
+        return peers
 
     def get_chat(self, peer_id: str) -> list:
         with self._chat_lock:
@@ -925,8 +937,9 @@ class MeshNode:
                 encrypted=   encrypted,
                 status=      status,
             )
-            with self._chat_lock:
-                self.chats.setdefault(peer_id, []).append(chat_msg)
+            # Use _upsert_chat_message to prevent duplicate entries if
+            # any other code path already inserted this msg_id.
+            self._upsert_chat_message(peer_id, chat_msg)
             persist_chat_entry({
                 "peer_id": peer_id,
                 "msg_id": chat_msg.msg_id,

@@ -248,9 +248,15 @@ class MediaEngine:
         self._last_send_interval = None
         self._audio_reorder.clear()
         self._audio_expected_seq = None
+        # Ping send times keyed by seq number for RTT calculation
+        self._ping_sent: dict = {}
         logger.info(f"Call started → {peer_ip}:{peer_media_port}")
         if self.on_call_state_change:
             self.on_call_state_change(CallState.ACTIVE)
+        # Start CONTROL ping loop for live latency measurement
+        threading.Thread(
+            target=self._ping_loop, daemon=True, name="media-ping"
+        ).start()
 
     def end_call(self):
         if self._call_state == CallState.ACTIVE:
@@ -323,15 +329,46 @@ class MediaEngine:
             offset += MAX_UDP_PAYLOAD
 
     def _send_control(self, data: bytes):
-        if self._peer_addr:
+        if self._peer_addr and self._sock:
             packet = self._make_packet(MEDIA_CONTROL, data)
-            self._sock.sendto(packet, self._peer_addr)
-            with self._stats_lock:
-                self.stats["packets_sent"] += 1
-                self.stats["bytes_sent"] += len(packet)
-                self.stats["uplink_packets_sent"] += 1
-                self.stats["uplink_bytes_sent"] += len(packet)
-                self._record_uplink_stats_locked(len(packet))
+            try:
+                self._sock.sendto(packet, self._peer_addr)
+                with self._stats_lock:
+                    self.stats["packets_sent"] += 1
+                    self.stats["bytes_sent"] += len(packet)
+                    self.stats["uplink_packets_sent"] += 1
+                    self.stats["uplink_bytes_sent"] += len(packet)
+                    self._record_uplink_stats_locked(len(packet))
+            except Exception:
+                pass
+
+    def _ping_loop(self):
+        """
+        Send CONTROL PING packets every 500 ms during an active call.
+        On receiving a PONG the round-trip time is measured and used as
+        the downlink_latency_ms metric, giving live latency even when
+        there is no real audio/video stream.
+        """
+        PING_INTERVAL = 0.5  # seconds
+        while self._running and self._call_state == CallState.ACTIVE:
+            if self._peer_addr and self._sock:
+                send_ts_ms = int(time.time() * 1000)
+                seq = self._seq_out
+                # Encode send timestamp in the ping payload so the pong can echo it
+                ping_payload = b"PING" + struct.pack("!q", send_ts_ms)
+                try:
+                    pkt = self._make_packet(MEDIA_CONTROL, ping_payload)
+                    self._sock.sendto(pkt, self._peer_addr)
+                    if not hasattr(self, '_ping_sent'):
+                        self._ping_sent = {}
+                    self._ping_sent[seq] = time.time()
+                    # Expire old pings
+                    cutoff = time.time() - 10.0
+                    self._ping_sent = {k: v for k, v in self._ping_sent.items()
+                                       if v > cutoff}
+                except Exception:
+                    pass
+            time.sleep(PING_INTERVAL)
 
     def _drain_audio_reorder(self, now_wall: float, force: bool = False):
         while True:
@@ -504,6 +541,35 @@ class MediaEngine:
                     self._peer_addr = None
                     if self.on_call_state_change:
                         self.on_call_state_change(CallState.ENDED)
+                elif payload[:4] == b"PING" and len(payload) >= 12:
+                    # Echo back a PONG with the original timestamp so sender can calc RTT
+                    pong_payload = b"PONG" + payload[4:]
+                    try:
+                        if self._peer_addr and self._sock:
+                            pkt = self._make_packet(MEDIA_CONTROL, pong_payload)
+                            self._sock.sendto(pkt, self._peer_addr)
+                    except Exception:
+                        pass
+                elif payload[:4] == b"PONG" and len(payload) >= 12:
+                    # Measure RTT from echoed timestamp
+                    try:
+                        sent_ts_ms = struct.unpack("!q", payload[4:12])[0]
+                        rtt_ms = max(0.0, float(int(time.time() * 1000) - sent_ts_ms))
+                        # One-way latency estimate = RTT / 2
+                        owd_ms = rtt_ms / 2.0
+                        with self._stats_lock:
+                            if self._latency_ewma_ms <= 0.0:
+                                self._latency_ewma_ms = owd_ms
+                            else:
+                                self._latency_ewma_ms = (
+                                    self._latency_ewma_ms * 0.7 + owd_ms * 0.3
+                                )
+                            self.stats["latency_ms"] = round(self._latency_ewma_ms, 2)
+                            self.stats["downlink_latency_ms"] = round(self._latency_ewma_ms, 2)
+                            self._down_latency_samples.append((now_wall, owd_ms))
+                            self._refresh_percentiles_locked(now_wall)
+                    except Exception:
+                        pass
 
     def get_stats(self) -> dict:
         with self._stats_lock:
