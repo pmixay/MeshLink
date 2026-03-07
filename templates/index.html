@@ -796,14 +796,13 @@ function selectGroup(groupId){
 }
 
 function updateCallButtons(){
-    const isGroup = isGroupKey(S.activePeer);
     const callButtons = document.querySelectorAll('.chat-actions .btn-icon[onclick^="initiateCall"]');
     callButtons.forEach(btn => {
-        btn.disabled = isGroup;
-        btn.style.opacity = isGroup ? '0.35' : '';
-        btn.style.cursor = isGroup ? 'not-allowed' : '';
-        if(isGroup){
-            btn.title = 'Group calls are not supported yet';
+        btn.disabled = false;
+        btn.style.opacity = '';
+        btn.style.cursor = '';
+        if(isGroupKey(S.activePeer)){
+            btn.title = 'Call selected group member';
         } else if(btn.getAttribute('onclick')?.includes("'audio'")){
             btn.title = 'Voice call';
         } else {
@@ -1100,7 +1099,26 @@ function completeXfer(d){
 function initiateCall(type){
     if(!S.activePeer)return;
     if(isGroupKey(S.activePeer)){
-        toast('Групповые звонки пока не поддерживаются. Выберите конкретного peer для звонка.');
+        const gid = groupIdFromKey(S.activePeer);
+        const g = S.groups.find(x=>x.group_id===gid) || {members:[]};
+        const members = Array.isArray(g.members) ? g.members.filter(m => m && m !== S.nodeId) : [];
+        if(!members.length){
+            toast('В группе нет участников для звонка');
+            return;
+        }
+        const known = new Map((S.peers || []).map(p => [p.peer_id, p.name || p.peer_id]));
+        const variants = members.map(m => `${known.get(m) || m} (${m})`).join(', ');
+        const val = prompt(`Кому позвонить из группы?\nВведите peer_id или имя.\nДоступные: ${variants}`);
+        if(!val) return;
+        const raw = val.trim();
+        const targetByName = (S.peers || []).find(p => (p.name || '').toLowerCase() === raw.toLowerCase());
+        const targetPeer = targetByName ? targetByName.peer_id : raw;
+        if(!members.includes(targetPeer)){
+            toast('Этот peer не состоит в выбранной группе');
+            return;
+        }
+        S.callPeer=targetPeer; S.callType=type; S.callDir='outgoing';
+        socket.emit('start_call',{peer_id:targetPeer,call_type:type});
         return;
     }
     S.callPeer=S.activePeer; S.callType=type; S.callDir='outgoing';
