@@ -7,9 +7,11 @@ import os
 import json
 import time
 import logging
+import shutil
 import tempfile
 from flask import Flask, render_template, request, jsonify, send_from_directory
 from flask_socketio import SocketIO, emit
+from werkzeug.utils import secure_filename
 
 try:
     from ..core.node import MeshNode
@@ -162,15 +164,48 @@ def api_upload():
         return jsonify({"error": "No peer_id"}), 400
 
     f = request.files["file"]
-    # Save to temp
-    tmp_dir = tempfile.mkdtemp(prefix="meshlink_")
-    tmp_path = os.path.join(tmp_dir, f.filename)
-    f.save(tmp_path)
+    # secure_filename prevents path traversal attacks (e.g. "../../etc/passwd")
+    safe_name = secure_filename(f.filename or "upload")
+    if not safe_name:
+        return jsonify({"error": "Invalid filename"}), 400
+
+    # Stage uploaded file inside DOWNLOADS_DIR so it is accessible by the
+    # asynchronous send_worker thread after this request returns.
+    # We use a unique sub-directory to avoid name collisions.
+    stage_dir = os.path.join(DOWNLOADS_DIR, ".upload_stage")
+    os.makedirs(stage_dir, exist_ok=True)
+    tmp_dir = tempfile.mkdtemp(prefix="meshlink_up_", dir=stage_dir)
+    tmp_path = os.path.join(tmp_dir, safe_name)
+
+    try:
+        f.save(tmp_path)
+    except Exception as e:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        return jsonify({"error": f"Failed to save upload: {e}"}), 500
 
     file_id = node.send_file(peer_id, tmp_path)
-    if file_id:
-        return jsonify({"file_id": file_id, "filename": f.filename})
-    return jsonify({"error": "Transfer failed"}), 500
+    if not file_id:
+        # Transfer rejected before even starting (peer unknown, policy block, etc.).
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        return jsonify({"error": "Transfer failed"}), 500
+
+    # Schedule temp dir cleanup after the transfer finishes.
+    # We wrap the existing on_complete so we don't lose the original callback.
+    _orig_on_complete = node.file_mgr.on_complete
+
+    def _on_complete_with_cleanup(transfer):
+        if _orig_on_complete:
+            try:
+                _orig_on_complete(transfer)
+            except Exception:
+                pass
+        if transfer.file_id == file_id:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            # Restore original callback now that this upload's cleanup is done.
+            node.file_mgr.on_complete = _orig_on_complete
+
+    node.file_mgr.on_complete = _on_complete_with_cleanup
+    return jsonify({"file_id": file_id, "filename": safe_name})
 
 
 @app.route("/downloads/<path:filename>")

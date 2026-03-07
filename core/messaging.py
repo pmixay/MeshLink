@@ -486,8 +486,11 @@ class MessageServer:
 
         if not self._try_acquire_send_slot(peer_id):
             logger.debug(f"Send backpressure: no free send slot for peer={peer_id}")
-            if should_track_delivery and not _from_outbox:
-                storage.mark_outbox_attempt(msg.msg_id, 1, time.time() + 0.5, "pending")
+            if should_track_delivery:
+                with self._delivery_lock:
+                    self._delivery_events.pop(msg.msg_id, None)
+                if not _from_outbox:
+                    storage.mark_outbox_attempt(msg.msg_id, 1, time.time() + 0.5, "pending")
             return False
 
         last_error = None

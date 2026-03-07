@@ -18,6 +18,7 @@ from typing import Dict, List, Optional
 
 _DB_LOCK = threading.RLock()
 _CONN: Optional[sqlite3.Connection] = None
+_CONN_LOCK = threading.Lock()   # guards _CONN first-time initialization
 
 
 def _base_dir() -> str:
@@ -34,14 +35,22 @@ def db_path() -> str:
 
 def _connect() -> sqlite3.Connection:
     global _CONN
-    if _CONN is None:
-        _CONN = sqlite3.connect(db_path(), check_same_thread=False)
-        _CONN.row_factory = sqlite3.Row
-        _CONN.execute("PRAGMA journal_mode=WAL;")
-        _CONN.execute("PRAGMA synchronous=NORMAL;")
-        _CONN.execute("PRAGMA temp_store=MEMORY;")
-        _CONN.execute("PRAGMA foreign_keys=ON;")
-        _init_schema(_CONN)
+    # Fast path — connection already initialized.
+    if _CONN is not None:
+        return _CONN
+    # Slow path — use a dedicated lock so that two threads racing here
+    # don't each create their own connection.  _DB_LOCK is RLock and is
+    # already held for every DB call, so we use a separate plain Lock.
+    with _CONN_LOCK:
+        if _CONN is None:
+            conn = sqlite3.connect(db_path(), check_same_thread=False)
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA journal_mode=WAL;")
+            conn.execute("PRAGMA synchronous=NORMAL;")
+            conn.execute("PRAGMA temp_store=MEMORY;")
+            conn.execute("PRAGMA foreign_keys=ON;")
+            _init_schema(conn)
+            _CONN = conn
     return _CONN
 
 
