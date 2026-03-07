@@ -721,9 +721,11 @@ class MeshNode:
             relay_msg.signature = self.crypto.sign(relay_msg.canonical_bytes())
             with self._relay_pressure_lock:
                 self._relay_pending += 1
-            self.msg_server.send_to_peer(peer.ip, peer.tcp_port, relay_msg, pid)
-            with self._relay_pressure_lock:
-                self._relay_pending = max(0, self._relay_pending - 1)
+            try:
+                self.msg_server.send_to_peer(peer.ip, peer.tcp_port, relay_msg, pid)
+            finally:
+                with self._relay_pressure_lock:
+                    self._relay_pending = max(0, self._relay_pending - 1)
 
     def _send_mesh_text(self, text: str, origin_msg_id: str = ""):
         """
@@ -757,14 +759,14 @@ class MeshNode:
             self.msg_server.send_to_peer(peer.ip, peer.tcp_port, relay_msg, pid)
 
     def _media_stats_loop(self):
-        while True:
+        while self._running:
             try:
                 stats = self.media.get_stats()
                 self._emit("media_stats", stats)
                 self._emit("network_diagnostics", self.get_network_diagnostics())
-                time.sleep(1.0)
             except Exception:
-                time.sleep(1.0)
+                pass
+            time.sleep(1.0)
 
     # ── WebRTC signaling relay ────────────────────────────────────────────────
 
@@ -825,9 +827,9 @@ class MeshNode:
                 file_name=   transfer.filename,
                 file_size=   transfer.filesize,
             )
-            with self._chat_lock:
-                self.chats.setdefault(transfer.peer_id, []).append(chat_msg)
-            self._emit("message", chat_msg.to_dict())
+            is_new = self._upsert_chat_message(transfer.peer_id, chat_msg)
+            if is_new:
+                self._emit("message", chat_msg.to_dict())
         elif transfer.direction == "send":
             chat_msg = ChatMessage(
                 msg_id=      f"file-{transfer.file_id}",
@@ -840,9 +842,9 @@ class MeshNode:
                 file_name=   transfer.filename,
                 file_size=   transfer.filesize,
             )
-            with self._chat_lock:
-                self.chats.setdefault(transfer.peer_id, []).append(chat_msg)
-            self._emit("message", chat_msg.to_dict())
+            is_new = self._upsert_chat_message(transfer.peer_id, chat_msg)
+            if is_new:
+                self._emit("message", chat_msg.to_dict())
 
     # ── Public API ────────────────────────────────────────────────────────────
 

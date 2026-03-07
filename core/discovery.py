@@ -121,9 +121,11 @@ class DiscoveryService:
         sock.bind(("", DISCOVERY_PORT))
 
         # Join multicast group
+        # Use "4s4s" (two fixed 4-byte fields) to match struct ip_mreq regardless
+        # of platform word size. "4sL" is wrong on 64-bit Linux where L=8 bytes.
         try:
             group = socket.inet_aton(MULTICAST_GROUP)
-            mreq  = struct.pack("4sL", group, socket.INADDR_ANY)
+            mreq  = struct.pack("4s4s", group, socket.inet_aton("0.0.0.0"))
             sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
         except Exception as e:
             logger.debug(f"Multicast join failed: {e}")

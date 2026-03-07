@@ -410,6 +410,8 @@ class FileTransferManager:
             })
             if self.on_progress:
                 self.on_progress(transfer)
+            if self.on_file_received:
+                self.on_file_received(transfer)
             if self.on_complete:
                 self.on_complete(transfer)
 
@@ -507,15 +509,17 @@ class FileTransferManager:
                                 sha.update(piece)
                                 remaining_hash -= len(piece)
 
-                    # Optional backward-compatible offset checksum validation.
+                    # Offset checksum validation: if our prefix hash disagrees with the
+                    # receiver's, we cannot silently seek to 0 — the receiver already opened
+                    # the partial file in append mode and would write from `existing` bytes,
+                    # corrupting the file. Raise to trigger a clean retry where the receiver
+                    # will reset its partial and accept from byte 0.
                     remote_expected_offset_sha = str(resp.get("offset_sha256", ""))
                     if remote_expected_offset_sha and sha.hexdigest() != remote_expected_offset_sha:
-                        logger.warning(
-                            f"Offset SHA mismatch for {transfer.filename}; restarting from zero"
+                        raise ConnectionError(
+                            f"Offset SHA mismatch for {transfer.filename}; "
+                            "aborting to retry from scratch"
                         )
-                        offset = 0
-                        transfer.progress = 0
-                        sha = hashlib.sha256()
 
                     last_emit = time.time()
                     sock.settimeout(120)
