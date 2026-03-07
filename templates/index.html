@@ -727,7 +727,7 @@ function renderPeers(){
             <div class="peer-avatar" style="background:${pColor(p.peer_id)}">${pInit(p.name)}<div class="status-dot"></div></div>
             <div class="peer-info">
                 <div class="peer-name">${escHtml(p.name)}</div>
-                <div class="peer-status-line">${trustHtml}</div>
+                <div class="peer-status-line">${trustHtml} · <span style="font-family:'JetBrains Mono',monospace">${escHtml(p.peer_id)}</span></div>
             </div>
             ${u?`<div class="peer-unread">${u}</div>`:''}
         </div>`;
@@ -813,9 +813,18 @@ function ensureGroupActions(groupId){
 function addMemberToActiveGroup(){
     if(!isGroupKey(S.activePeer)) return;
     const gid = groupIdFromKey(S.activePeer);
-    const val = prompt('Введите peer_id нового участника (например: nodec):');
+    const g = S.groups.find(x=>x.group_id===gid) || {members:[]};
+    const existing = new Set(Array.isArray(g.members) ? g.members : []);
+    const candidates = (S.peers || []).filter(p => !existing.has(p.peer_id));
+    const hints = candidates.slice(0, 8).map(p => `${p.name} (${p.peer_id})`).join(', ');
+    const val = prompt(`Введите peer_id ИЛИ имя нового участника.\nДоступные: ${hints || 'нет'}`);
     if(!val) return;
-    const members = val.split(',').map(x=>x.trim()).filter(Boolean);
+    const nameToId = new Map((S.peers || []).map(p => [String(p.name || '').toLowerCase(), p.peer_id]));
+    const members = val
+        .split(',')
+        .map(x=>x.trim())
+        .filter(Boolean)
+        .map(x => nameToId.get(x.toLowerCase()) || x);
     if(!members.length) return;
     socket.emit('add_group_members', {group_id: gid, members});
 }
