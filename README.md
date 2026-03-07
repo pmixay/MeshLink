@@ -342,4 +342,4 @@ python -m pytest -q
 
 ## Лицензия
 
-MIT
+The unlicense
