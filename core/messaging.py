@@ -64,6 +64,8 @@ class MsgType(IntEnum):
     SEED_PAIR     = 70
     # Group chat payload (fanout to listed peers)
     GROUP_TEXT    = 80
+    # Group metadata sync (name + members, no chat message)
+    GROUP_SYNC    = 81
 
 
 @dataclass
@@ -686,6 +688,19 @@ def make_group_text_message(group_id: str, text: str, members: List[str]) -> Mes
         payload={
             "group_id": group_id,
             "text": text,
+            "members": members,
+        },
+    )
+
+
+def make_group_sync_message(group_id: str, name: str, members: List[str]) -> Message:
+    return Message(
+        msg_type=MsgType.GROUP_SYNC,
+        sender_id=NODE_ID,
+        sender_name=NODE_NAME,
+        payload={
+            "group_id": group_id,
+            "group_name": name,
             "members": members,
         },
     )

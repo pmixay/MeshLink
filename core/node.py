@@ -33,7 +33,7 @@ from .discovery import DiscoveryService, PeerInfo
 from .messaging import (
     MessageServer, Message, MsgType,
     make_text_message, make_call_invite, make_key_exchange,
-    make_seed_pair_message, make_group_text_message,
+    make_seed_pair_message, make_group_text_message, make_group_sync_message,
     persist_chat_entry,
 )
 from .file_transfer import FileTransferManager
@@ -284,6 +284,7 @@ class MeshNode:
         self.msg_server.on(MsgType.MESH_RELAY,   self._on_mesh_relay)
         self.msg_server.on(MsgType.SEED_PAIR,    self._on_seed_pair)
         self.msg_server.on(MsgType.GROUP_TEXT,   self._on_group_text)
+        self.msg_server.on(MsgType.GROUP_SYNC,   self._on_group_sync)
         self.msg_server.on_delivery_status = self._on_delivery_status
 
         self.msg_server.on(MsgType.WEBRTC_OFFER,  self._on_webrtc_signal)
@@ -554,6 +555,43 @@ class MeshNode:
             out["peer_id"] = chat_key
             self._emit("group_message", out)
 
+    def _on_group_sync(self, msg: Message):
+        if not self._security_check(msg):
+            return
+        self._on_peer_activity(msg.sender_id)
+        if not self._is_trusted_allowed(msg.sender_id, "text", "incoming", msg_id=msg.msg_id):
+            return
+
+        group_id = str(msg.payload.get("group_id", "")).strip()
+        if not group_id:
+            return
+        group_name = str(msg.payload.get("group_name", "")).strip()
+        members = list(msg.payload.get("members", []) or [])
+        if msg.sender_id not in members:
+            members.append(msg.sender_id)
+        if NODE_ID not in members:
+            members.append(NODE_ID)
+        self._upsert_group(group_id, group_name, members)
+
+    def _broadcast_group_sync(self, group: dict):
+        if not group:
+            return
+        group_id = str(group.get("group_id", "")).strip()
+        if not group_id:
+            return
+        members = list(group.get("members", []) or [])
+        name = str(group.get("name", "")).strip()
+        recipients = [pid for pid in members if pid and pid != NODE_ID]
+        for pid in recipients:
+            peer = self.discovery.get_peer(pid)
+            if not peer:
+                continue
+            if not self._is_trusted_allowed(pid, "text", "outgoing"):
+                continue
+            msg = make_group_sync_message(group_id, name, members)
+            msg.signature = self.crypto.sign(msg.canonical_bytes())
+            self.msg_server.send_to_peer(peer.ip, peer.tcp_port, msg, pid)
+
     # ── Mesh flooding / relay ────────────────────────────────────────────────
 
     def _on_mesh_relay(self, msg: Message):
@@ -810,7 +848,9 @@ class MeshNode:
                 continue
             valid_members.append(pid)
         valid_members.append(NODE_ID)
-        return self._upsert_group(gid, (name or "New Group").strip(), valid_members)
+        group = self._upsert_group(gid, (name or "New Group").strip(), valid_members)
+        self._broadcast_group_sync(group)
+        return group
 
     def get_groups(self) -> list:
         with self._group_lock:
@@ -838,7 +878,9 @@ class MeshNode:
             allowed.append(pid)
 
         merged = list(existing.get("members", [])) + allowed
-        return self._upsert_group(group_id, existing.get("name", ""), merged)
+        updated = self._upsert_group(group_id, existing.get("name", ""), merged)
+        self._broadcast_group_sync(updated)
+        return updated
 
     def send_group_text(self, group_id: str, text: str) -> Optional[dict]:
         group_id = str(group_id or "").strip()

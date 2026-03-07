@@ -1,4 +1,5 @@
 from core.node import MeshNode
+from core.messaging import Message, MsgType
 
 
 class _DummyDiscovery:
@@ -47,4 +48,28 @@ def test_add_group_members(monkeypatch):
     upd = node.add_group_members(g["group_id"], ["p2"])
     assert upd is not None
     assert "p2" in (upd.get("members") or [])
+
+
+def test_group_sync_creates_group_on_receiver(monkeypatch):
+    node = MeshNode()
+    node.discovery = _DummyDiscovery()
+    node.discovery._peers["p1"] = _DummyPeer(tcp_port=22001)
+
+    monkeypatch.setattr(node.crypto, "is_trusted", lambda pid: True)
+
+    incoming = Message(
+        msg_type=MsgType.GROUP_SYNC,
+        sender_id="p1",
+        sender_name="Peer-1",
+        payload={
+            "group_id": "g-sync-1",
+            "group_name": "Dev Team",
+            "members": ["p1", "nodeb"],
+        },
+        msg_id="msg-gsync-1",
+    )
+
+    node._on_group_sync(incoming)
+    groups = node.get_groups()
+    assert any(g.get("group_id") == "g-sync-1" for g in groups)
 
