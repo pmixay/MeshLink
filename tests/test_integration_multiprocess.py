@@ -51,8 +51,9 @@ def _node_process_main(cmd_q: "mp.Queue", resp_q: "mp.Queue", cfg: dict):
                 out = node.send_file(cmd.get("peer_id", ""), cmd.get("path", ""))
                 resp_q.put({"id": cid, "ok": bool(out), "data": out})
             elif op == "pair_with_seed":
-                ok = node.pair_with_seed(cmd.get("peer_id", ""), cmd.get("seed", ""))
-                resp_q.put({"id": cid, "ok": ok})
+                result = node.pair_with_seed(cmd.get("peer_id", ""), cmd.get("seed", ""))
+                # node.pair_with_seed returns a dict like {"ok": bool, ...}
+                resp_q.put({"id": cid, "ok": bool(result.get("ok")), "data": result})
             else:
                 resp_q.put({"id": cid, "ok": False, "error": f"unknown op {op}"})
         except Exception as e:
@@ -201,6 +202,14 @@ def test_multiprocess_text_file_and_restart_recovery():
 
             seq = _wait_peers(qa_cmd, qa_resp, seq, expected_min=2, timeout=35.0)
             seq = _wait_peers(qb_cmd, qb_resp, seq, expected_min=2, timeout=35.0)
+
+            # Re-pair after restart (trusted-only policy is in-memory for this test process model)
+            r_repair_b = _rpc(qb_cmd, qb_resp, seq, "pair_with_seed", peer_id="nodea", seed="ABCDEF", timeout=10.0)
+            seq += 1
+            assert r_repair_b.get("ok") is True
+            r_repair_a = _rpc(qa_cmd, qa_resp, seq, "pair_with_seed", peer_id="nodeb", seed="ABCDEF", timeout=10.0)
+            seq += 1
+            assert r_repair_a.get("ok") is True
 
             r3 = _rpc(qa_cmd, qa_resp, seq, "send_text", peer_id="nodeb", text="mp-after-restart", timeout=10.0)
             seq += 1
