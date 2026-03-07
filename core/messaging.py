@@ -62,10 +62,6 @@ class MsgType(IntEnum):
     MESH_RELAY    = 60
     # Seed-pairing handshake
     SEED_PAIR     = 70
-    # Group chat payload (fanout to listed peers)
-    GROUP_TEXT    = 80
-    # Group metadata sync (name + members, no chat message)
-    GROUP_SYNC    = 81
 
 
 @dataclass
@@ -680,27 +676,3 @@ def make_seed_pair_message(peer_id_target: str, seed: str) -> Message:
     )
 
 
-def make_group_text_message(group_id: str, text: str, members: List[str]) -> Message:
-    return Message(
-        msg_type=MsgType.GROUP_TEXT,
-        sender_id=NODE_ID,
-        sender_name=NODE_NAME,
-        payload={
-            "group_id": group_id,
-            "text": text,
-            "members": members,
-        },
-    )
-
-
-def make_group_sync_message(group_id: str, name: str, members: List[str]) -> Message:
-    return Message(
-        msg_type=MsgType.GROUP_SYNC,
-        sender_id=NODE_ID,
-        sender_name=NODE_NAME,
-        payload={
-            "group_id": group_id,
-            "group_name": name,
-            "members": members,
-        },
-    )

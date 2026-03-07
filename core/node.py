@@ -33,7 +33,7 @@ from .discovery import DiscoveryService, PeerInfo
 from .messaging import (
     MessageServer, Message, MsgType,
     make_text_message, make_call_invite, make_key_exchange,
-    make_seed_pair_message, make_group_text_message, make_group_sync_message,
+    make_seed_pair_message,
     persist_chat_entry,
 )
 from .file_transfer import FileTransferManager
@@ -173,8 +173,6 @@ class MeshNode:
 
         self.chats:             Dict[str, List[ChatMessage]] = {}
         self._chat_lock         = threading.Lock()
-        self.groups:            Dict[str, dict] = {}
-        self._group_lock        = threading.Lock()
         self.current_call_peer: Optional[str] = None
 
         self._seen_msgs  = _LRUSet(MESH_LRU_MAX_SIZE)
@@ -283,8 +281,6 @@ class MeshNode:
         self.msg_server.on(MsgType.TYPING,       self._on_typing)
         self.msg_server.on(MsgType.MESH_RELAY,   self._on_mesh_relay)
         self.msg_server.on(MsgType.SEED_PAIR,    self._on_seed_pair)
-        self.msg_server.on(MsgType.GROUP_TEXT,   self._on_group_text)
-        self.msg_server.on(MsgType.GROUP_SYNC,   self._on_group_sync)
         self.msg_server.on_delivery_status = self._on_delivery_status
 
         self.msg_server.on(MsgType.WEBRTC_OFFER,  self._on_webrtc_signal)
@@ -478,119 +474,6 @@ class MeshNode:
             self.expected_seeds.pop(peer_id, None)
             self._emit("seed_pair_result", {"ok": True, "peer_id": peer_id})
         self._emit("seed_paired", {"peer_id": peer_id, "peer_name": msg.sender_name})
-
-    # ── Group chat ────────────────────────────────────────────────────────────
-
-    @staticmethod
-    def _group_chat_key(group_id: str) -> str:
-        return f"group:{group_id}"
-
-    def _upsert_group(self, group_id: str, name: str, members: List[str]) -> dict:
-        now = time.time()
-        clean_members = sorted({m for m in members if m})
-        with self._group_lock:
-            g = self.groups.get(group_id)
-            if g is None:
-                g = {
-                    "group_id": group_id,
-                    "name": name or f"Group {group_id[:6]}",
-                    "members": clean_members,
-                    "created_at": now,
-                    "updated_at": now,
-                }
-                self.groups[group_id] = g
-                self._emit("group_created", dict(g))
-                return dict(g)
-
-            changed = False
-            if name and name != g.get("name"):
-                g["name"] = name
-                changed = True
-
-            merged = sorted(set(g.get("members", [])) | set(clean_members))
-            if merged != g.get("members", []):
-                g["members"] = merged
-                changed = True
-
-            if changed:
-                g["updated_at"] = now
-                self._emit("group_updated", dict(g))
-            return dict(g)
-
-    def _on_group_text(self, msg: Message):
-        if not self._security_check(msg):
-            return
-        self._on_peer_activity(msg.sender_id)
-        if not self._is_trusted_allowed(msg.sender_id, "text", "incoming", msg_id=msg.msg_id):
-            return
-
-        group_id = str(msg.payload.get("group_id", "")).strip()
-        if not group_id:
-            return
-        text = str(msg.payload.get("text", ""))
-        group_name = str(msg.payload.get("group_name", "")).strip()
-        members = list(msg.payload.get("members", []) or [])
-        if msg.sender_id not in members:
-            members.append(msg.sender_id)
-        if NODE_ID not in members:
-            members.append(NODE_ID)
-        self._upsert_group(group_id, group_name, members)
-
-        chat_key = self._group_chat_key(group_id)
-        chat_msg = ChatMessage(
-            msg_id=msg.msg_id,
-            sender_id=msg.sender_id,
-            sender_name=msg.sender_name,
-            text=text,
-            timestamp=msg.timestamp,
-            is_me=False,
-            msg_type="text",
-            signed=bool(msg.signature),
-            encrypted=bool(msg.payload.get("encrypted")),
-            status="delivered",
-        )
-        if self._upsert_chat_message(chat_key, chat_msg):
-            out = chat_msg.to_dict()
-            out["group_id"] = group_id
-            out["peer_id"] = chat_key
-            self._emit("group_message", out)
-
-    def _on_group_sync(self, msg: Message):
-        if not self._security_check(msg):
-            return
-        self._on_peer_activity(msg.sender_id)
-        if not self._is_trusted_allowed(msg.sender_id, "text", "incoming", msg_id=msg.msg_id):
-            return
-
-        group_id = str(msg.payload.get("group_id", "")).strip()
-        if not group_id:
-            return
-        group_name = str(msg.payload.get("group_name", "")).strip()
-        members = list(msg.payload.get("members", []) or [])
-        if msg.sender_id not in members:
-            members.append(msg.sender_id)
-        if NODE_ID not in members:
-            members.append(NODE_ID)
-        self._upsert_group(group_id, group_name, members)
-
-    def _broadcast_group_sync(self, group: dict):
-        if not group:
-            return
-        group_id = str(group.get("group_id", "")).strip()
-        if not group_id:
-            return
-        members = list(group.get("members", []) or [])
-        name = str(group.get("name", "")).strip()
-        recipients = [pid for pid in members if pid and pid != NODE_ID]
-        for pid in recipients:
-            peer = self.discovery.get_peer(pid)
-            if not peer:
-                continue
-            if not self._is_trusted_allowed(pid, "text", "outgoing"):
-                continue
-            msg = make_group_sync_message(group_id, name, members)
-            msg.signature = self.crypto.sign(msg.canonical_bytes())
-            self.msg_server.send_to_peer(peer.ip, peer.tcp_port, msg, pid)
 
     # ── Mesh flooding / relay ────────────────────────────────────────────────
 
@@ -834,105 +717,6 @@ class MeshNode:
         if not self._is_trusted_allowed(peer_id, "file", "outgoing"):
             return None
         return self.file_mgr.send_file(filepath, peer.ip, peer.file_port, peer_id)
-
-    def create_group(self, name: str, members: List[str]) -> dict:
-        gid = str(time.time_ns())[-10:]
-        valid_members = []
-        for pid in sorted(set(members or [])):
-            if not pid or pid == NODE_ID:
-                continue
-            peer = self.discovery.get_peer(pid)
-            if not peer:
-                continue
-            if not self.crypto.is_trusted(pid):
-                continue
-            valid_members.append(pid)
-        valid_members.append(NODE_ID)
-        group = self._upsert_group(gid, (name or "New Group").strip(), valid_members)
-        self._broadcast_group_sync(group)
-        return group
-
-    def get_groups(self) -> list:
-        with self._group_lock:
-            return [dict(v) for _, v in sorted(self.groups.items(), key=lambda x: x[1].get("name", ""))]
-
-    def add_group_members(self, group_id: str, members: List[str]) -> Optional[dict]:
-        group_id = str(group_id or "").strip()
-        if not group_id:
-            return None
-
-        with self._group_lock:
-            existing = dict(self.groups.get(group_id) or {})
-        if not existing:
-            return None
-
-        allowed = []
-        for pid in sorted(set(members or [])):
-            if not pid or pid == NODE_ID:
-                continue
-            peer = self.discovery.get_peer(pid)
-            if not peer:
-                continue
-            if not self.crypto.is_trusted(pid):
-                continue
-            allowed.append(pid)
-
-        merged = list(existing.get("members", [])) + allowed
-        updated = self._upsert_group(group_id, existing.get("name", ""), merged)
-        self._broadcast_group_sync(updated)
-        return updated
-
-    def send_group_text(self, group_id: str, text: str) -> Optional[dict]:
-        group_id = str(group_id or "").strip()
-        text = str(text or "").strip()
-        if not group_id or not text:
-            return None
-
-        with self._group_lock:
-            g = dict(self.groups.get(group_id) or {})
-        if not g:
-            return None
-
-        members = list(g.get("members", []))
-        recipients = [pid for pid in members if pid and pid != NODE_ID]
-        if not recipients:
-            return None
-
-        sent_any = False
-        for pid in recipients:
-            peer = self.discovery.get_peer(pid)
-            if not peer:
-                continue
-            if not self._is_trusted_allowed(pid, "text", "outgoing"):
-                continue
-            msg = make_group_text_message(group_id, text, members)
-            msg.payload["group_name"] = g.get("name", "")
-            msg.signature = self.crypto.sign(msg.canonical_bytes())
-            if self.msg_server.send_to_peer(peer.ip, peer.tcp_port, msg, pid):
-                sent_any = True
-
-        if not sent_any:
-            return None
-
-        local_msg = ChatMessage(
-            msg_id=f"group-{NODE_ID}-{time.time_ns()}",
-            sender_id=NODE_ID,
-            sender_name=NODE_NAME,
-            text=text,
-            timestamp=time.time(),
-            is_me=True,
-            msg_type="text",
-            signed=True,
-            encrypted=False,
-            status="sent",
-        )
-        chat_key = self._group_chat_key(group_id)
-        self._upsert_chat_message(chat_key, local_msg)
-        out = local_msg.to_dict()
-        out["group_id"] = group_id
-        out["peer_id"] = chat_key
-        self._emit("group_message", out)
-        return out
 
     # ── Seed-pairing API ─────────────────────────────────────────────────────
 

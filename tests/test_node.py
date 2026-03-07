@@ -153,37 +153,6 @@ def test_peer_activity_expires_stale_session(monkeypatch):
     assert any(ev["event"] == "session_expired" for ev in events)
 
 
-def test_create_group_filters_untrusted_and_unknown(monkeypatch):
-    node = MeshNode()
-    node.discovery = _DummyDiscovery()
-    node.discovery._peers["p1"] = _DummyPeer()
-    node.discovery._peers["p2"] = _DummyPeer(tcp_port=10001)
-
-    monkeypatch.setattr(node.crypto, "is_trusted", lambda pid: pid == "p1")
-
-    g = node.create_group("Team", ["p1", "p2", "unknown"])
-    assert g["name"] == "Team"
-    assert "p1" in g["members"]
-    assert "p2" not in g["members"]
-
-
-def test_send_group_text_fans_out_and_emits(monkeypatch):
-    node = MeshNode()
-    node.discovery = _DummyDiscovery()
-    node.discovery._peers["p1"] = _DummyPeer(ip="127.0.0.1", tcp_port=15001)
-
-    monkeypatch.setattr(node.crypto, "is_trusted", lambda pid: True)
-    monkeypatch.setattr(node.msg_server, "send_to_peer", lambda ip, port, msg, pid: True)
-
-    created = node.create_group("G1", ["p1"])
-    got = []
-    node.on("group_message", lambda d: got.append(d))
-
-    out = node.send_group_text(created["group_id"], "hello-group")
-    assert out is not None
-    assert got and got[-1]["group_id"] == created["group_id"]
-
-
 def test_call_fails_when_transport_unavailable(monkeypatch):
     node = MeshNode()
     node.discovery = _DummyDiscovery()

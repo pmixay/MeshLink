@@ -68,9 +68,6 @@ def init_app(mesh_node: MeshNode):
     node.on("webrtc_ice",    lambda d: socketio.emit("webrtc_ice", d))
     node.on("seed_paired", lambda d: socketio.emit("seed_paired", d))
     node.on("seed_pair_result", lambda d: socketio.emit("seed_pair_result", d))
-    node.on("group_created", lambda d: socketio.emit("group_created", d))
-    node.on("group_updated", lambda d: socketio.emit("group_updated", d))
-    node.on("group_message", lambda d: socketio.emit("group_message", d))
 
 
 # ── Routes ──────────────────────────────────────────────
@@ -94,10 +91,6 @@ def api_chat(peer_id):
 @app.route("/api/transfers")
 def api_transfers():
     return jsonify(node.get_transfers())
-
-@app.route("/api/groups")
-def api_groups():
-    return jsonify(node.get_groups())
 
 @app.route("/api/statistics")
 def api_statistics():
@@ -292,7 +285,6 @@ def api_network_diagnostics():
 def on_connect():
     emit("node_info", node.get_info())
     emit("peers_list", node.get_peers())
-    emit("groups_list", node.get_groups())
     emit("statistics", node.get_statistics())
 
 @socketio.on("send_message")
@@ -321,39 +313,6 @@ def on_get_chat(data):
     peer_id = data.get("peer_id", "")
     if peer_id:
         emit("chat_history", {"peer_id": peer_id, "messages": node.get_chat(peer_id)})
-
-@socketio.on("create_group")
-def on_create_group(data):
-    name = (data or {}).get("name", "")
-    members = list((data or {}).get("members", []) or [])
-    group = node.create_group(name, members)
-    emit("group_created", group)
-    emit("groups_list", node.get_groups())
-
-@socketio.on("get_groups")
-def on_get_groups():
-    emit("groups_list", node.get_groups())
-
-@socketio.on("add_group_members")
-def on_add_group_members(data):
-    group_id = (data or {}).get("group_id", "")
-    members = list((data or {}).get("members", []) or [])
-    updated = node.add_group_members(group_id, members)
-    if updated:
-        emit("group_updated", updated)
-        emit("groups_list", node.get_groups())
-    else:
-        emit("error", {"message": "Failed to add group members"})
-
-@socketio.on("send_group_message")
-def on_send_group_message(data):
-    group_id = (data or {}).get("group_id", "")
-    text = (data or {}).get("text", "")
-    out = node.send_group_text(group_id, text)
-    if out:
-        emit("group_message_sent", out)
-    else:
-        emit("error", {"message": "Failed to send group message"})
 
 @socketio.on("start_call")
 def on_start_call(data):

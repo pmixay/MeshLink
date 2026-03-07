@@ -271,7 +271,6 @@ python -m pytest -q
 - `GET /api/peers`
 - `GET /api/chat/<peer_id>`
 - `GET /api/transfers`
-- `GET /api/groups`
 - `GET /api/statistics`
 - `GET /api/webrtc/config`
 - `POST /api/upload`
@@ -292,7 +291,6 @@ python -m pytest -q
 Входящие события:
 
 - `send_message`, `typing`, `get_peers`, `get_chat`
-- `create_group`, `get_groups`, `send_group_message`
 - `start_call`, `accept_call`, `reject_call`, `end_call`
 - `webrtc_offer`, `webrtc_answer`, `webrtc_ice`
 - `seed_pair`, `blacklist_peer`
@@ -300,7 +298,6 @@ python -m pytest -q
 Исходящие события:
 
 - `node_info`, `peers_list`, `statistics`
-- `groups_list`, `group_created`, `group_updated`, `group_message`, `group_message_sent`
 - `peer_joined`, `peer_left`
 - `message`, `message_sent`, `message_status`
 - `typing`
