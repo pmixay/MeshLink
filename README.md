@@ -1,47 +1,48 @@
 # Hex.Team MeshLink
 
-Децентрализованная система связи для локальной сети (LAN) и прямых P2P-соединений: обнаружение узлов, защищённый чат, передача файлов, real-time коммуникация и диагностика без центрального сервера.
+Децентрализованная система связи для локальной сети (LAN) и прямых P2P-соединений: обнаружение узлов, защищённый чат, передача файлов и real-time коммуникация без центрального сервера.
 
-Документ подготовлен в формате, удобном для защиты проекта по ТЗ «Hex.Team — Система децентрализованной связи».
+README приведён в соответствие с фактической реализацией и структурой ТЗ «Hex.Team — Система децентрализованной связи».
 
 ---
 
 ## 1) Цель проекта
 
-`MeshLink` решает задачу связи в условиях, когда централизованная инфраструктура недоступна или нежелательна:
+`MeshLink` предназначен для связи в сценариях, где нет стабильного доступа к централизованной инфраструктуре:
 
-- локальные мероприятия с перегрузкой сети;
-- закрытые площадки/сегменты;
-- аварийные и офлайн-сценарии.
+- перегруженные локальные сети;
+- закрытые площадки;
+- аварийные/offline-сценарии.
 
-Система строит P2P/mesh-коммуникацию между узлами в одной сети, обеспечивая обмен сообщениями, файлами и коммуникацию в реальном времени с контролем надёжности и безопасности.
+Решение строит mesh-взаимодействие узлов в одном сетевом контуре и даёт текстовый чат, передачу файлов, вызовы и диагностику состояния.
 
 ---
 
 ## 2) Что реализовано
 
-- **Обнаружение узлов** (UDP broadcast/multicast + статические пиры).
-- **Установка P2P-сессии** между узлами.
-- **Текстовый обмен** в обе стороны.
-- **Мультихоп/ретрансляция** сообщений (flooding + TTL + дедупликация).
-- **Передача файлов** (чанки, SHA-256, докачка, статусы).
-- **Real-time связь** (голос/видео через WebRTC) + live-метрики.
-- **Надёжность** (ACK, очереди, retry, outbox, backpressure).
-- **Безопасность** (шифрование, подпись, pairing, anti-spam, blacklist).
-- **Диагностика** (`/metrics`, network/security endpoints, health probes).
+- Обнаружение узлов: UDP broadcast/multicast + статические peer-адреса через env.
+- P2P-сессии между узлами.
+- Обмен текстовыми сообщениями в обе стороны.
+- Мультихоп-ретрансляция: flooding + TTL + dedup + relay path.
+- Передача файлов: чанки, SHA-256, частичная докачка (resume), статусы прогресса.
+- Real-time коммуникация: WebRTC signaling + UI-метрики (latency/loss/jitter/bitrate).
+- Надёжность сообщений: ack/retry/outbox/backpressure.
+- Безопасность: X25519 + AES-GCM, подписи Ed25519, seed pairing, rate limit/ban/blacklist.
+- Диагностика: health/ready/metrics, network/security endpoints.
 
 ---
 
-## 3) Технологический стек
+## 3) Стек
 
-- **Backend:** Python 3.10+
-- **Web/API:** Flask + Socket.IO
-- **P2P транспорт:**
-  - UDP — discovery + media transport;
-  - TCP — messaging + file transfer.
-- **Криптография:** X25519 (ECDH), AES-256-GCM, Ed25519.
-- **Хранение:** SQLite (WAL).
-- **UI:** SPA в `templates/index.html`.
+- Backend: Python 3.10+
+- Web/API: Flask + Socket.IO
+- Транспорт:
+  - UDP: discovery
+  - TCP: messaging + file transfer
+  - WebRTC (браузер): media
+- Криптография: X25519 (ECDH), AES-256-GCM, Ed25519
+- Хранение: SQLite (WAL)
+- UI: SPA в `templates/index.html`
 
 ---
 
@@ -55,20 +56,32 @@ core/
 ├── discovery.py         — обнаружение узлов (UDP)
 ├── messaging.py         — TCP messaging, ACK/retry/outbox/relay
 ├── file_transfer.py     — чанковая передача файлов, resume, integrity
-├── media.py             — real-time медиа и метрики качества
+├── media.py             — UDP media engine + метрики
 ├── node.py              — оркестратор подсистем
 └── storage.py           — SQLite storage
 web/
 └── server.py            — HTTP API + Socket.IO
 templates/
-└── index.html           — клиентский интерфейс
+└── index.html           — web-клиент
+```
+
+### Архитектурная схема
+
+```mermaid
+flowchart LR
+    UI[Web UI] --> WS[web/server.py\nFlask + Socket.IO]
+    WS --> NODE[core/node.py\nMeshNode]
+    NODE --> DISC[core/discovery.py]
+    NODE --> MSG[core/messaging.py]
+    NODE --> FILE[core/file_transfer.py]
+    NODE --> MEDIA[core/media.py]
+    NODE --> CRYPTO[core/crypto.py]
+    NODE --> DB[core/storage.py\nSQLite]
 ```
 
 ### Топология
 
-Поддерживаемая топология — **mesh в пределах LAN**.
-
-Пример:
+Базовый режим — mesh в пределах LAN:
 
 ```text
 A ─── B ─── C
@@ -77,8 +90,8 @@ A ─── B ─── C
 ```
 
 - узлы обнаруживаются динамически;
-- при исчезновении узла peer timeout удаляет/помечает его как offline;
-- при недоступности прямого пути используется ретрансляция (при наличии связного графа).
+- при timeout узел помечается offline/удаляется из активных;
+- при отсутствии прямого канала используется ретрансляция через промежуточные узлы.
 
 ---
 
@@ -116,22 +129,22 @@ python main.py --name "Charlie" --web-port 8082 --tcp-port 5171 --media-port 517
 | `--media-port`, `-m` | UDP media | 5152 |
 | `--file-port`, `-f` | TCP file transfer | 5153 |
 | `--discovery-port`, `-d` | UDP discovery | 5150 |
-| `--discovery-peers`, `-p` | Статический список host:port | — |
-| `--no-browser` | Не открывать браузер автоматически | — |
+| `--no-browser` | Не открывать браузер автоматически | false |
+| `--verbose`, `-v` | Debug-логи | false |
 
-Ключевые env-переменные: `MESHLINK_NODE_NAME`, `MESHLINK_WEB_PORT`, `MESHLINK_TRUSTED_ONLY` и др.
+Статические peer-адреса discovery настраиваются через env: `MESHLINK_DISCOVERY_PEERS` (comma-separated `host[:port]`).
 
 ---
 
 ## 6) Соответствие обязательным сценариям ТЗ
 
-| Сценарий ТЗ | Статус | Где реализовано |
+| Сценарий ТЗ | Статус | Реализация |
 |---|---|---|
 | 1. Обнаружение узлов и список устройств | ✅ | `core/discovery.py`, `GET /api/peers` |
 | 2. Установка P2P-сессии | ✅ | `core/node.py`, `core/messaging.py` |
-| 3. Обмен текстовыми сообщениями в обе стороны | ✅ | `core/messaging.py`, Socket.IO `send_message` |
-| 4. Мультихоп-цепочка / ретранслятор | ✅ | relay в `core/messaging.py` (TTL + dedup) |
-| 5. Передача файла с контролем целостности и статусом | ✅ | `core/file_transfer.py`, `file_progress`, `file_complete` |
+| 3. Текстовый обмен в обе стороны | ✅ | `core/messaging.py`, Socket.IO `send_message` |
+| 4. Мультихоп/ретрансляция | ✅ | relay в `core/node.py` (TTL + dedup + relay path) |
+| 5. Передача файла с целостностью и статусом | ✅ | `core/file_transfer.py`, события `file_progress`/`file_complete` |
 | 6. Real-time коммуникация (голос/видео) | ✅ | WebRTC signaling + метрики в `templates/index.html` |
 
 ---
@@ -140,56 +153,54 @@ python main.py --name "Charlie" --web-port 8082 --tcp-port 5171 --media-port 517
 
 ### Сообщения
 
-- Идентификаторы сообщений (`msg_id`) для дедупликации.
-- TTL + relay path для защиты от петель.
-- ACK/статусы доставки.
-- Retry с ограничениями и backoff.
-- Outbox/очередь для временно недоступных пиров.
+- `msg_id` для дедупликации;
+- TTL + relay path для защиты от петель;
+- ACK и статусы доставки;
+- retry с backoff;
+- outbox/очередь для недоступных пиров;
+- ограничение relay-фанаута и backpressure.
 
 ### Реакция на сбои
 
-- peer timeout и обновление списка узлов;
-- ретраи при недоставке;
-- сохранение истории и служебного состояния в SQLite;
-- диагностика queue/delivery/file transfer через API.
+- peer timeout + обновление списка узлов;
+- retry при недоставке;
+- персистентность истории/счётчиков в SQLite;
+- диагностика delivery/queue/file-transfer через API.
 
 ---
 
 ## 8) Real-time звонки и метрики
 
-### Транспорт и буферизация
+### Транспорт
 
 - signaling: Socket.IO + message channel;
-- медиа: WebRTC (браузерный стек), UDP-транспорт;
-- jitter/latency/loss/bitrate в интерфейсе.
+- медиа: WebRTC (браузерный RTP/UDP стек).
 
 ### Методика замеров
 
-Вызов `RTCPeerConnection.getStats()` раз в 1 секунду.
+В UI используется `RTCPeerConnection.getStats()` (период 1 секунда) + EMA-сглаживание (`alpha = 0.3`) для:
 
-Используется EMA-сглаживание (α = 0.3) для:
-
-- RTT/latency;
-- loss (дельта-подход по счётчикам);
-- jitter;
+- latency (RTT),
+- jitter,
+- loss (delta-based),
 - bitrate.
 
-Пользовательский UI отображает текущие значения и остаётся интерактивным при потере пакетов (изменения качества видны в метриках).
+Показатели отображаются в интерфейсе в реальном времени.
 
 ---
 
 ## 9) Передача файлов
 
-Поддерживаемые механики:
+Реализовано:
 
 - чанковая передача;
-- контроль целостности (SHA-256);
-- подтверждения/повторы;
-- докачка после разрыва;
-- частично завершённые передачи;
-- ограничения нагрузки (размер чанка, параллелизм, контроль активных отправок).
+- SHA-256 контроль целостности;
+- подтверждение завершения и retry;
+- resume с продолжением по offset + проверка offset-хеша;
+- хранение partial-файлов и докачка после разрыва;
+- ограничение нагрузки (лимит активных отправок/параллелизма).
 
-Диагностика доступна через `/api/network/diagnostics` и `/api/transfers`.
+Диагностика: `GET /api/network/diagnostics`, `GET /api/transfers`.
 
 ---
 
@@ -197,41 +208,42 @@ python main.py --name "Charlie" --web-port 8082 --tcp-port 5171 --media-port 517
 
 ### Реализовано
 
-- шифрование трафика: X25519 + AES-256-GCM;
-- подпись сообщений: Ed25519;
-- базовая идентификация узлов: node_id + pairing;
-- trust onboarding: seed pairing;
+- шифрование: X25519 + AES-256-GCM;
+- подпись и проверка: Ed25519;
+- идентификация узлов: `node_id` + seed pairing;
+- trusted-only политика для чатов/звонков/файлов;
 - защита от злоупотреблений: rate limit, autoban, blacklist;
-- меры против подмены/петель в relay (подпись + TTL + dedup).
+- меры против replay/loop в relay: `msg_id` + TTL + dedup + подпись.
 
 ### Короткая модель угроз
 
-Система учитывает:
+Покрываемые угрозы:
 
-- подмену/модификацию сообщений;
-- повторную доставку старых пакетов;
-- спам/флуд со стороны узлов;
-- частичную деградацию сети (loss, jitter, разрывы).
+- подмена/модификация сообщений;
+- replay старых пакетов;
+- спам/флуд;
+- деградация канала (loss/jitter/disconnect).
 
 ---
 
 ## 11) Документация и тестируемость
 
-В репозитории присутствуют:
+В репозитории есть:
 
 - исходный код;
 - этот README;
-- архитектурное описание в структуре модулей;
-- endpoints для логов/метрик/диагностики;
-- набор тестов:
+- архитектурная схема (см. раздел 4);
+- диагностические endpoints (`/health`, `/ready`, `/metrics`, `/api/network/diagnostics`, `/api/security/events`);
+- тесты:
   - `tests/test_messaging.py`
   - `tests/test_node.py`
   - `tests/test_file_transfer.py`
   - `tests/test_media.py`
   - `tests/test_e2e_load.py`
   - `tests/test_integration_multiprocess.py`
+  - `tests/test_web_server.py`
 
-Запуск тестов:
+Запуск:
 
 ```bash
 python -m pytest -q
@@ -239,7 +251,7 @@ python -m pytest -q
 
 ---
 
-## 12) API (для демонстрации)
+## 12) API для демонстрации
 
 ### REST
 
@@ -247,10 +259,14 @@ python -m pytest -q
 - `GET /api/peers`
 - `GET /api/chat/<peer_id>`
 - `GET /api/transfers`
+- `GET /api/statistics`
 - `POST /api/upload`
+- `POST /api/add_peer`
 - `POST /api/seed/generate`
 - `POST /api/seed/pair`
-- `GET /api/security/snapshot`
+- `GET /api/security/blacklist`
+- `POST /api/security/blacklist`
+- `DELETE /api/security/blacklist/<peer_id>`
 - `GET /api/security/events`
 - `GET /api/network/diagnostics`
 - `GET /metrics`
@@ -259,29 +275,44 @@ python -m pytest -q
 
 ### Socket.IO
 
-Входящие: `send_message`, `typing`, `start_call`, `accept_call`, `reject_call`, `end_call`, `webrtc_offer`, `webrtc_answer`, `webrtc_ice`, `seed_pair`, `blacklist_peer`.
+Входящие события:
 
-Исходящие: `peer_joined`, `peer_left`, `message`, `message_sent`, `message_status`, `call_incoming`, `call_accepted`, `call_rejected`, `call_ended`, `media_stats`, `file_progress`, `file_complete`, `security_event`, `network_diagnostics`.
+- `send_message`, `typing`, `get_peers`, `get_chat`
+- `start_call`, `accept_call`, `reject_call`, `end_call`
+- `webrtc_offer`, `webrtc_answer`, `webrtc_ice`
+- `seed_pair`, `blacklist_peer`
+
+Исходящие события:
+
+- `node_info`, `peers_list`, `statistics`
+- `peer_joined`, `peer_left`
+- `message`, `message_sent`, `message_status`
+- `typing`
+- `call_incoming`, `call_outgoing`, `call_accepted`, `call_rejected`, `call_ended`
+- `webrtc_offer`, `webrtc_answer`, `webrtc_ice`
+- `file_progress`, `file_complete`
+- `security_event`, `seed_paired`, `seed_pair_result`, `blacklist_updated`
 
 ---
 
 ## 13) План демонстрации на защите
 
-1. Запуск 3 узлов и показ auto-discovery.
-2. P2P чат A↔B и подтверждение доставки.
-3. Отключение прямой связности A↔C и демонстрация мультихоп через B.
-4. Передача файла с отображением прогресса и проверкой SHA-256.
-5. Голосовой вызов, демонстрация latency/loss/jitter/bitrate.
-6. Провокация потерь (например, ограничение сети), показ устойчивости и метрик.
-7. Показ security events, diagnostics и `/metrics`.
+1. Поднять 3 узла и показать авто-discovery.
+2. Показать P2P чат A↔B и статусы доставки.
+3. Показать мультихоп A→C через B.
+4. Передать файл, показать прогресс и итоговый SHA-256.
+5. Показать голосовой вызов и live-метрики (latency/loss/jitter/bitrate).
+6. Ввести искусственные потери (внешние средства ограничений сети), показать устойчивость и изменение метрик.
+7. Показать security events, diagnostics и `/metrics`.
 
 ---
 
 ## 14) Ограничения и честные рамки
 
-- Основной режим: **LAN / единый сетевой контур**.
-- NAT traversal / BLE / Wi‑Fi Direct fallback в базовой версии не являются целевым сценарием.
-- Качество real-time зависит от свойств сети и браузерного WebRTC стека.
+- Основной режим: LAN / единый сетевой контур.
+- NAT traversal, BLE fallback, Wi‑Fi Direct fallback — не входят в базовую реализацию.
+- Качество real-time зависит от сети и браузерного WebRTC-стека.
+- Полноценное серверное измерение QoS звонков не реализовано; метрики считаются на клиенте через WebRTC stats API.
 
 ---
 
