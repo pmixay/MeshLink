@@ -393,10 +393,37 @@ const S = {
     _restoredOnLoad: false,
     // WebRTC: ICE candidates can arrive before pc exists or before remoteDescription.
     _pendingIce: [],
+    rtcConfig: null,
+    rtcPolicy: 'all',
+    rtcFallbackUsed: false,
 };
 let pc = null;
 let localStream = null;
 let _rtcStatsInterval = null;
+
+async function loadRtcConfig(){
+    try{
+        const r = await fetch('/api/webrtc/config');
+        if(!r.ok) throw new Error('webrtc config unavailable');
+        const cfg = await r.json();
+        if(cfg && Array.isArray(cfg.iceServers) && cfg.iceServers.length){
+            S.rtcConfig = { iceServers: cfg.iceServers, iceTransportPolicy: (cfg.iceTransportPolicy || 'all') };
+            S.rtcPolicy = S.rtcConfig.iceTransportPolicy || 'all';
+        }
+    }catch(_){
+        S.rtcConfig = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }], iceTransportPolicy: 'all' };
+        S.rtcPolicy = 'all';
+    }
+}
+
+function applyRtcPolicy(policy){
+    const p = (policy === 'relay') ? 'relay' : 'all';
+    S.rtcPolicy = p;
+    if(!S.rtcConfig) S.rtcConfig = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
+    S.rtcConfig.iceTransportPolicy = p;
+    const sel = document.getElementById('ice-policy');
+    if(sel) sel.value = p;
+}
 
 function isGroupKey(pid){ return typeof pid === 'string' && pid.startsWith('group:'); }
 function groupIdFromKey(pid){ return isGroupKey(pid) ? pid.slice(6) : ''; }
@@ -1014,8 +1041,6 @@ function completeXfer(d){
 // ═══════════════════════════════════════════════
 //  WEBRTC CALLS WITH LIVE METRICS
 // ═══════════════════════════════════════════════
-const rtcConfig = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
-
 function initiateCall(type){
     if(!S.activePeer)return;
     S.callPeer=S.activePeer; S.callType=type; S.callDir='outgoing';
@@ -1051,7 +1076,8 @@ async function startWebRTC(isCaller){
         lv.play?.().catch(()=>{});
     }
 
-    pc = new RTCPeerConnection(rtcConfig);
+    const runtimeCfg = S.rtcConfig || { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }], iceTransportPolicy: S.rtcPolicy || 'all' };
+    pc = new RTCPeerConnection(runtimeCfg);
     localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
 
     // In case ICE candidates arrived before pc was created.
@@ -1081,7 +1107,21 @@ async function startWebRTC(isCaller){
 
     pc.onconnectionstatechange = () => {
         if(pc.connectionState === 'connected'){ S.callActive = true; startTimer(); startRTCStats(); }
-        if(pc.connectionState === 'disconnected' || pc.connectionState === 'failed') hangUp();
+        if(pc.connectionState === 'disconnected' || pc.connectionState === 'failed'){
+            if(!S.rtcFallbackUsed && S.rtcPolicy !== 'relay'){
+                S.rtcFallbackUsed = true;
+                applyRtcPolicy('relay');
+                toast('Network degradation detected: switching ICE to relay and retrying call');
+                const peer = S.callPeer;
+                const ctype = S.callType || 'audio';
+                cleanupCall(false);
+                if(peer){
+                    socket.emit('start_call',{peer_id:peer,call_type:ctype});
+                }
+                return;
+            }
+            hangUp();
+        }
     };
 
     if(isCaller){
@@ -1322,6 +1362,29 @@ function addPeer(){
         }
     }).catch(() => toast('Failed to add peer'));
 }
+
+// Runtime ICE policy switch
+document.addEventListener('DOMContentLoaded', async ()=>{
+    await loadRtcConfig();
+    const controlsHost = document.querySelector('.stats-panel');
+    if(controlsHost && !document.getElementById('ice-policy')){
+        const wrap = document.createElement('div');
+        wrap.className = 'form-group';
+        wrap.style.marginTop = '8px';
+        wrap.innerHTML = `<label class="form-label" style="font-size:11px">ICE Policy</label>
+            <select id="ice-policy" class="form-input" style="font-size:12px;padding:6px 8px">
+                <option value="all">all (direct + relay)</option>
+                <option value="relay">relay only (TURN)</option>
+            </select>`;
+        controlsHost.appendChild(wrap);
+        const sel = document.getElementById('ice-policy');
+        sel.value = S.rtcPolicy || 'all';
+        sel.addEventListener('change', ()=>{
+            applyRtcPolicy(sel.value);
+            toast(`ICE policy switched to ${S.rtcPolicy}`);
+        });
+    }
+});
 </script>
 </body>
 </html>

@@ -177,8 +177,15 @@ python main.py --name "Charlie" --web-port 8082 --tcp-port 5171 --media-port 517
 
 Показатели отображаются в интерфейсе в реальном времени.
 
+Дополнительно реализовано:
+- runtime-переключение ICE policy (`all` / `relay`) прямо в UI;
+- авто-fallback на `relay` при деградации соединения.
+
 Формализованная методика замеров и шаблон таблицы результатов:
 - `docs/REALTIME_MEASUREMENTS.md`
+
+Сравнительный отчёт по эффективности (до/после/условный baseline):
+- `docs/BENCHMARK_REPORT.md`
 
 ---
 
@@ -266,6 +273,7 @@ python -m pytest -q
 - `GET /api/transfers`
 - `GET /api/groups`
 - `GET /api/statistics`
+- `GET /api/webrtc/config`
 - `POST /api/upload`
 - `POST /api/add_peer`
 - `POST /api/seed/generate`

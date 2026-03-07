@@ -23,6 +23,20 @@ FILE_PORT      = int(os.environ.get("MESHLINK_FILE_PORT",      5153))
 WEB_PORT       = int(os.environ.get("MESHLINK_WEB_PORT",       8080))
 
 # ──────────────────────────────────────────────
+# WebRTC ICE / STUN / TURN fallback
+# ──────────────────────────────────────────────
+WEBRTC_STUN = [u.strip() for u in os.environ.get(
+    "MESHLINK_WEBRTC_STUN",
+    "stun:stun.l.google.com:19302",
+).split(",") if u.strip()]
+WEBRTC_TURN_URL = os.environ.get("MESHLINK_WEBRTC_TURN_URL", "").strip()
+WEBRTC_TURN_USER = os.environ.get("MESHLINK_WEBRTC_TURN_USER", "").strip()
+WEBRTC_TURN_PASS = os.environ.get("MESHLINK_WEBRTC_TURN_PASS", "").strip()
+WEBRTC_ICE_POLICY = os.environ.get("MESHLINK_WEBRTC_ICE_POLICY", "all").strip().lower()
+if WEBRTC_ICE_POLICY not in ("all", "relay"):
+    WEBRTC_ICE_POLICY = "all"
+
+# ──────────────────────────────────────────────
 # Discovery settings
 # ──────────────────────────────────────────────
 DISCOVERY_INTERVAL = float(os.environ.get("MESHLINK_DISCOVERY_INTERVAL", 5.0))

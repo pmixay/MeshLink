@@ -15,10 +15,16 @@ from werkzeug.utils import secure_filename
 
 try:
     from ..core.node import MeshNode
-    from ..core.config import WEB_PORT, NODE_ID, NODE_NAME, LOCAL_IP, DOWNLOADS_DIR
+    from ..core.config import (
+        WEB_PORT, NODE_ID, NODE_NAME, LOCAL_IP, DOWNLOADS_DIR,
+        WEBRTC_STUN, WEBRTC_TURN_URL, WEBRTC_TURN_USER, WEBRTC_TURN_PASS, WEBRTC_ICE_POLICY,
+    )
 except ImportError:
     from core.node import MeshNode
-    from core.config import WEB_PORT, NODE_ID, NODE_NAME, LOCAL_IP, DOWNLOADS_DIR
+    from core.config import (
+        WEB_PORT, NODE_ID, NODE_NAME, LOCAL_IP, DOWNLOADS_DIR,
+        WEBRTC_STUN, WEBRTC_TURN_URL, WEBRTC_TURN_USER, WEBRTC_TURN_PASS, WEBRTC_ICE_POLICY,
+    )
 
 logger = logging.getLogger("meshlink.web")
 
@@ -96,6 +102,28 @@ def api_groups():
 @app.route("/api/statistics")
 def api_statistics():
     return jsonify(node.get_statistics())
+
+@app.route("/api/webrtc/config")
+def api_webrtc_config():
+    ice_servers = []
+    for stun in WEBRTC_STUN:
+        ice_servers.append({"urls": stun})
+    if WEBRTC_TURN_URL:
+        turn = {"urls": WEBRTC_TURN_URL}
+        if WEBRTC_TURN_USER:
+            turn["username"] = WEBRTC_TURN_USER
+        if WEBRTC_TURN_PASS:
+            turn["credential"] = WEBRTC_TURN_PASS
+        ice_servers.append(turn)
+    return jsonify({
+        "iceServers": ice_servers,
+        "iceTransportPolicy": WEBRTC_ICE_POLICY,
+        "fallbackPolicy": {
+            "enabled": bool(WEBRTC_TURN_URL),
+            "retryRelayOnFailure": True,
+            "maxFallbackAttempts": 1,
+        },
+    })
 
 @app.route("/api/upload", methods=["POST"])
 def api_upload():
