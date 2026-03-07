@@ -78,9 +78,13 @@ class Message:
     # Signing fields
     signature:   str   = ""   # base64-encoded Ed25519 signature of canonical payload
 
-    def to_bytes(self) -> bytes:
+    def ensure_msg_id(self):
+        """Ensure msg_id is set. Must be called before signing."""
         if not self.msg_id:
             self.msg_id = f"{self.sender_id}-{time.time_ns()}"
+
+    def to_bytes(self) -> bytes:
+        self.ensure_msg_id()
         data = json.dumps({
             "type":        self.msg_type,
             "sender_id":   self.sender_id,

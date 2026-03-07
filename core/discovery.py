@@ -169,14 +169,23 @@ class DiscoveryService:
             status=     payload.get("status", "online"),
         )
 
+        keys_changed = False
         with self._lock:
-            # Preserve trust flag if peer was already known
             if not is_new:
-                peer.trusted = self.peers[peer_id].trusted
+                old_peer = self.peers[peer_id]
+                peer.trusted = old_peer.trusted
+                # Detect key changes (peer restarted or rotated keys)
+                if (peer.public_key and peer.public_key != old_peer.public_key) or \
+                   (peer.signing_key and peer.signing_key != old_peer.signing_key):
+                    keys_changed = True
             self.peers[peer_id] = peer
 
         if is_new:
             logger.info(f"New peer discovered: {peer.name} ({peer.ip})")
+            if self.on_peer_joined:
+                self.on_peer_joined(peer)
+        elif keys_changed:
+            logger.info(f"Peer keys updated: {peer.name} ({peer.ip})")
             if self.on_peer_joined:
                 self.on_peer_joined(peer)
 

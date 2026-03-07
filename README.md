@@ -1,260 +1,181 @@
-# MeshLink — Decentralized P2P Communication System
+# MeshLink
 
-**No Internet. No Servers. Just the Mesh.**
+Мессенджер для локальной сети, который работает без интернета и серверов. Просто запускаешь на нескольких компьютерах в одной сети — и они находят друг друга сами.
 
-MeshLink is a fully decentralized communication platform that works entirely over your local network (LAN). It provides instant messaging, file transfers, and voice/video call signaling — all without any internet connection or central server.
+## Что умеет
 
----
+- **Автообнаружение** — устройства находят друг друга по UDP broadcast/multicast, ничего настраивать не нужно
+- **Чат с шифрованием** — E2E шифрование (X25519 + AES-256-GCM), подпись сообщений (Ed25519), иконки замочка прямо в чате
+- **Передача файлов** — до 2 ГБ, с докачкой при обрыве, проверка целостности через SHA-256
+- **Голосовые и видеозвонки** — через WebRTC, с отображением задержки, потерь и jitter в реальном времени
+- **Mesh-ретрансляция** — сообщения могут идти через промежуточные узлы (flooding с TTL и дедупликацией)
+- **Сопряжение по seed-фразе** — 6-символьный код для доверенного соединения
+- **Защита от спама** — rate limiting по каждому пиру + автобан + ручной blacklist
+- **Хранение истории** — SQLite на устройстве, переживает перезапуски
+- **Метрики и диагностика** — Security Events, Network Diagnostics, Prometheus endpoint
 
-## Features
-
-- **Zero-config P2P Discovery** — Automatic peer detection via UDP broadcast + multicast
-- **Encrypted Messaging** — End-to-end encryption using X25519 key exchange + AES-256-GCM
-- **Delivery Statuses** — `sent` / `delivered` / `failed` with retry/backoff in transport
-- **File Transfer** — Chunked file streaming with SHA-256 integrity verification (up to 2 GB)
-- **Resumable File Transfer** — Resume/retry for interrupted 50–200 MB+ transfers
-- **Voice & Video Call Signaling** — UDP-based media engine with packet fragmentation
-- **Media Quality Upgrade** — directional (`uplink`/`downlink`) metrics, rolling `p50/p95` for latency/jitter, audio jitter-buffer + packet reordering
-- **Call Metrics in UI** — real-time latency/loss/jitter/bitrate plus directional diagnostics
-- **Security UX** — Message badges for encrypted/signed state and risk warnings
-- **Diagnostics UX** — dedicated *Security Events* tab with filters and *Network Diagnostics* panel
-- **Modern Web UI** — Beautiful dark-themed interface with real-time updates via WebSocket
-- **Cross-Platform** — Runs on Windows, macOS, and Linux (Python 3.9+)
-
----
-
-## Quick Start
-
-### 1. Install dependencies
+## Быстрый старт
 
 ```bash
-cd meshlink
 pip install -r requirements.txt
-```
-
-### 2. Run MeshLink
-
-```bash
 python main.py
 ```
 
-The web UI will automatically open at `http://localhost:8080`.
-
-### 3. Run on another machine
-
-On a second computer on the same LAN:
+Откроется веб-интерфейс на `http://localhost:8080`. На втором компьютере в той же сети:
 
 ```bash
-python main.py --name "Bob" --web-port 8081
+python main.py --name "Bob"
 ```
 
-Peers will discover each other automatically within seconds.
+Через пару секунд пиры увидят друг друга.
 
----
-
-## CLI Options
-
-| Flag | Description | Default |
-|------|-------------|---------|
-| `--name`, `-n` | Display name | System hostname |
-| `--web-port`, `-w` | Web UI port | 8080 |
-| `--tcp-port`, `-t` | TCP messaging port | 5151 |
-| `--media-port`, `-m` | UDP media port | 5152 |
-| `--discovery-port`, `-d` | Discovery broadcast port | 5150 |
-| `--no-browser` | Don't auto-open browser | false |
-| `--verbose`, `-v` | Debug logging | false |
-
-### Environment Variables
-
-All options can also be set via environment:
+### Тестирование на одной машине
 
 ```bash
-export MESHLINK_NODE_NAME="Alice"
-export MESHLINK_WEB_PORT=9090
-export MESHLINK_TCP_PORT=5151
-export MESHLINK_MEDIA_PORT=5152
-export MESHLINK_DISCOVERY_PORT=5150
-export MESHLINK_DOWNLOADS="~/Downloads/MeshLink"
-export MESHLINK_TRUSTED_ONLY=1
+# Терминал 1
+python main.py --name "Alice" --web-port 8080 --tcp-port 5151 --media-port 5152 --file-port 5153
+
+# Терминал 2
+python main.py --name "Bob" --web-port 8081 --tcp-port 5161 --media-port 5162 --file-port 5163
+
+# Терминал 3 (ретранслятор)
+python main.py --name "Charlie" --web-port 8082 --tcp-port 5171 --media-port 5172 --file-port 5173
 ```
 
-`MESHLINK_TRUSTED_ONLY=1` enables strict mode: personal text chats are only accepted/sent for seed-paired (trusted) peers.
+## Параметры запуска
 
----
+| Флаг | Описание | По умолчанию |
+|------|----------|--------------|
+| `--name`, `-n` | Имя узла | hostname |
+| `--web-port`, `-w` | Порт веб-интерфейса | 8080 |
+| `--tcp-port`, `-t` | TCP порт сообщений | 5151 |
+| `--media-port`, `-m` | UDP порт медиа | 5152 |
+| `--file-port`, `-f` | TCP порт файлов | 5153 |
+| `--discovery-port`, `-d` | UDP порт обнаружения | 5150 |
+| `--no-browser` | Не открывать браузер | — |
+| `--verbose`, `-v` | Подробные логи | — |
 
-## Architecture
+Все параметры можно задать через переменные окружения (`MESHLINK_NODE_NAME`, `MESHLINK_WEB_PORT` и т.д.).
 
-```
-meshlink/
-├── main.py                 # Entry point & CLI
-├── requirements.txt        # Python dependencies
-├── setup.py               # pip installable package
-├── core/
-│   ├── config.py          # Configuration & constants
-│   ├── crypto.py          # E2E encryption (X25519 + AES-256-GCM)
-│   ├── discovery.py       # UDP broadcast peer discovery
-│   ├── messaging.py       # TCP messaging protocol
-│   ├── file_transfer.py   # Chunked file transfer engine
-│   ├── media.py           # UDP voice/video streaming engine
-│   └── node.py            # Central orchestrator
-├── web/
-│   └── server.py          # Flask + SocketIO web server
-└── templates/
-    └── index.html         # Web UI (single-page app)
-```
+`MESHLINK_TRUSTED_ONLY=1` — строгий режим: чат только с seed-paired пирами.
 
-### Protocol Stack
+## Архитектура
 
 ```
-┌──────────────────────────────────────────────┐
-│              Web UI (Browser)                │
-│          Flask + Socket.IO (WebSocket)       │
-├──────────────────────────────────────────────┤
-│              MeshNode Orchestrator           │
-├───────────┬──────────────┬───────────────────┤
-│ Discovery │  Messaging   │   Media Engine    │
-│   (UDP    │   (TCP)      │    (UDP)          │
-│ broadcast)│              │                   │
-├───────────┼──────────────┼───────────────────┤
-│           │  File Xfer   │  Audio / Video    │
-│           │  (chunked)   │  (fragmented)     │
-├───────────┴──────────────┴───────────────────┤
-│         E2E Encryption (X25519 + AES)        │
-├──────────────────────────────────────────────┤
-│           LAN (WiFi / Ethernet)              │
-└──────────────────────────────────────────────┘
+main.py                  — точка входа
+core/
+├── config.py            — конфигурация и константы
+├── crypto.py            — X25519 ECDH + AES-256-GCM + Ed25519 подпись + seed-pairing
+├── discovery.py         — UDP broadcast/multicast обнаружение пиров
+├── messaging.py         — TCP протокол сообщений с retries и outbox
+├── file_transfer.py     — передача файлов с докачкой и контролем целостности
+├── media.py             — UDP аудио/видео с jitter-буфером и метриками
+├── node.py              — оркестратор: связывает все подсистемы
+└── storage.py           — SQLite хранилище (WAL mode)
+web/
+└── server.py            — Flask + Socket.IO
+templates/
+└── index.html           — SPA интерфейс
 ```
 
----
+### Стек протоколов
 
-## Network Ports
-
-| Port | Protocol | Purpose |
-|------|----------|---------|
-| 5150 | UDP | Peer discovery (broadcast + multicast) |
-| 5151 | TCP | Messaging & file transfer |
-| 5152 | UDP | Voice/video media streaming |
-| 8080 | TCP | Web UI (HTTP + WebSocket) |
-
-> **Firewall**: If peers can't find each other, ensure these ports are open for LAN traffic.
-
----
-
-## Security
-
-- **Key Exchange**: X25519 Elliptic-Curve Diffie-Hellman
-- **Message Encryption**: AES-256-GCM with per-message nonce
-- **File Integrity**: SHA-256 checksums
-- **No Data Leaves LAN**: All traffic stays on your local network
-
----
-
-## Running Multiple Instances (Testing)
-
-You can run multiple instances on the same machine for testing:
-
-```bash
-# Terminal 1
-python main.py --name "Alice" --web-port 8080 --tcp-port 5151 --media-port 5152
-
-# Terminal 2
-python main.py --name "Bob" --web-port 8081 --tcp-port 5161 --media-port 5162
-
-# Terminal 3
-python main.py --name "Charlie" --web-port 8082 --tcp-port 5171 --media-port 5172
+```
+┌─────────────────────────────────────┐
+│        Браузер (WebRTC / UI)        │
+│      Flask + Socket.IO (WS)        │
+├─────────────────────────────────────┤
+│         MeshNode оркестратор        │
+├──────────┬────────────┬─────────────┤
+│Discovery │  Messaging │ Media Engine│
+│  (UDP)   │   (TCP)    │   (UDP)     │
+├──────────┼────────────┼─────────────┤
+│          │File Transfer│ Audio/Video│
+│          │ (chunked)  │(fragmented) │
+├──────────┴────────────┴─────────────┤
+│    E2E: X25519 + AES-256-GCM       │
+├─────────────────────────────────────┤
+│         LAN (Wi-Fi / Ethernet)      │
+└─────────────────────────────────────┘
 ```
 
----
+## Порты
 
-## Reliability + Security Validation (Full Scope)
+| Порт | Протокол | Назначение |
+|------|----------|------------|
+| 5150 | UDP | Обнаружение пиров (broadcast + multicast) |
+| 5151 | TCP | Сообщения + сигнализация |
+| 5152 | UDP | Медиастриминг (аудио/видео) |
+| 5153 | TCP | Передача файлов |
+| 8080 | HTTP/WS | Веб-интерфейс |
 
-### Automated tests
+Если пиры не видят друг друга — проверь файрвол на этих портах.
 
-Install test deps and run:
+## Безопасность
+
+- **Шифрование**: X25519 ECDH → AES-256-GCM с уникальным nonce на каждое сообщение
+- **Подпись**: Ed25519 — каждое сообщение подписывается, получатель проверяет
+- **Forward secrecy**: ротация ключей сессии (по умолчанию раз в час)
+- **Seed-pairing**: 6-символьный код через PBKDF2 → доверенная сессия
+- **Rate limiting**: 60 сообщений / 10 секунд на пира, автобан на 60 секунд
+- **Blacklist**: ручная блокировка через UI или API
+- **Целостность файлов**: SHA-256 чексума + проверка при докачке
+- **Mesh relay**: подпись каждого ретранслируемого сообщения, TTL для защиты от петель, LRU дедупликация
+
+## Mesh-ретрансляция
+
+Каждый узел может выступать ретранслятором. Если A не видит C напрямую, но оба видят B — сообщение пройдёт через B:
+
+```
+A ──── B ──── C
+       │
+       └── ретранслятор
+```
+
+- Flooding с декрементом TTL (по умолчанию 5 хопов)
+- Дедупликация по msg_id через LRU кеш (2000 записей)
+- Адаптивный fanout при backpressure
+- Подпись каждого relay-пакета
+
+## Тесты
 
 ```bash
 pip install -r requirements.txt
 python -m pytest -q
 ```
 
-Current test suite covers:
+Что покрыто:
+- `test_messaging.py` — фрейминг, персистентность, delivery/retry
+- `test_node.py` — delivery sync, trusted-only policy, security snapshot
+- `test_file_transfer.py` — частичная загрузка, cleanup, retry
+- `test_media.py` — метрики, статистика
+- `test_e2e_load.py` — нагрузочный тест, burst send
+- `test_integration_multiprocess.py` — мультипроцессный сценарий (2-3 узла)
 
-- `tests/test_messaging.py` — message framing, persistence replay, delivery/retry status behavior
-- `tests/test_node.py` — delivery status sync, trusted-only policy, relay signature-drop path, security snapshot API
-- `tests/test_file_transfer.py` — stale partial cleanup, invalid input handling, retry/failure path
-- `tests/test_media.py` — media metric helpers / stat shape
-- `tests/test_e2e_load.py` — e2e/load smoke for burst send and degraded retry pattern
+## API
 
-### Manual LAN degradation checks
+### REST
 
-1. Start 2–3 nodes on one LAN (or one host with different ports).
-2. Send 100+ text messages quickly, verify statuses (`sent → delivered`, failures on disconnect).
-3. During 50–200 MB transfer, temporarily disable network on receiver and restore it.
-   - Transfer should resume from offset and finish with checksum validation.
-4. Start voice/video call and monitor live metrics panel:
-   - latency, loss, jitter, bitrate update continuously.
-5. Trigger security actions:
-   - enable trusted-only mode (`MESHLINK_TRUSTED_ONLY=1`),
-   - blacklist/unblacklist peer,
-   - send invalid relay packets (test harness or modified node).
-   - Observe admin security panel and `/api/security/snapshot` / `/api/security/events`.
+- `GET /api/info` — информация об узле
+- `GET /api/peers` — список пиров
+- `GET /api/chat/<peer_id>` — история чата
+- `GET /api/transfers` — файловые передачи
+- `POST /api/upload` — отправка файла (multipart)
+- `POST /api/seed/generate` — генерация seed-фразы
+- `POST /api/seed/pair` — сопряжение с пиром
+- `GET /api/security/snapshot` — состояние безопасности
+- `GET /api/security/events` — лог событий безопасности
+- `GET /api/network/diagnostics` — диагностика сети
+- `GET /metrics` — Prometheus-формат
+- `GET /health` — healthcheck
+- `GET /ready` — readiness probe
 
-### Security admin observability endpoints
+### Socket.IO события
 
-- `GET /api/security/snapshot` — trusted-only flag, blacklist, banned peers, latest events
-- `GET /api/security/events?limit=200` — rolling security events stream for admin tools/UI
+Входящие: `send_message`, `typing`, `start_call`, `accept_call`, `reject_call`, `end_call`, `webrtc_offer`, `webrtc_answer`, `webrtc_ice`, `seed_pair`, `blacklist_peer`
 
-### Network diagnostics endpoints/events
+Исходящие: `peer_joined`, `peer_left`, `message`, `message_sent`, `message_status`, `call_incoming`, `call_accepted`, `call_rejected`, `call_ended`, `media_stats`, `file_progress`, `file_complete`, `security_event`, `network_diagnostics`
 
-- `GET /api/network/diagnostics` — aggregate diagnostics snapshot:
-  - delivery retries/failures and current `failed_reason`,
-  - outbox backlog / relay pending / relay drops,
-  - active file sends and free slots,
-  - media directional hints (uplink/downlink bitrate, p95 jitter, downlink loss).
-- `Socket.IO: network_diagnostics` — periodic push for UI diagnostics panel.
+## Лицензия
 
-### Media stats shape (selected keys)
-
-Backward-compatible legacy keys are preserved (`latency_ms`, `jitter_ms`, `loss_percent`, `bitrate_kbps`), and now additionally exposed:
-
-- `uplink_latency_ms`, `uplink_latency_p50_ms`, `uplink_latency_p95_ms`
-- `uplink_jitter_ms`, `uplink_jitter_p50_ms`, `uplink_jitter_p95_ms`
-- `downlink_latency_ms`, `downlink_latency_p50_ms`, `downlink_latency_p95_ms`
-- `downlink_jitter_ms`, `downlink_jitter_p50_ms`, `downlink_jitter_p95_ms`
-- `uplink_bitrate_kbps`, `downlink_bitrate_kbps`
-
-Audio receive path now includes a bounded jitter-buffer with packet reordering before callback delivery.
-
-### Multi-process integration coverage
-
-Added deterministic process-based integration scenario (`2–3` nodes):
-
-- text delivery path,
-- file delivery path,
-- recovery after kill/restart.
-
-Run explicitly:
-
-```bash
-python -m pytest -q tests/test_integration_multiprocess.py
-```
-
-or full suite:
-
-```bash
-python -m pytest -q
-```
-
-### CI (clean environment)
-
-GitHub Actions workflow: `.github/workflows/e2e-integration.yml`
-
-- installs dependencies on a fresh runner,
-- runs smoke subset,
-- runs multi-process integration job.
-
----
-
-## License
-
-MIT License — Use freely, modify freely, share freely.
+MIT
